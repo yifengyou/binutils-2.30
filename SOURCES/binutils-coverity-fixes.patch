@@ -1,0 +1,2307 @@
+--- binutils.orig/bfd/archive.c	2019-10-04 15:26:08.544327573 +0100
++++ binutils-2.30/bfd/archive.c	2019-10-04 16:58:45.088039134 +0100
+@@ -734,6 +734,9 @@ _bfd_get_elt_at_filepos (bfd *archive, f
+   /* Copy is_linker_input.  */
+   n_bfd->is_linker_input = archive->is_linker_input;
+ 
++  /* Coverity does not realise that _bfd_add_bfd_to_archive_cache actually
++     stores the newly created bfd and so flags a resource leak.  */
++  /* coverity[noescape: FALSE] */
+   if (_bfd_add_bfd_to_archive_cache (archive, filepos, n_bfd))
+     return n_bfd;
+ 
+diff -rup binutils.orig/bfd/coffcode.h binutils-2.30/bfd/coffcode.h
+--- binutils.orig/bfd/coffcode.h	2019-10-07 15:49:39.425618524 +0100
++++ binutils-2.30/bfd/coffcode.h	2019-10-07 15:53:18.335157361 +0100
+@@ -3737,6 +3737,9 @@ coff_write_object_contents (bfd * abfd)
+ 
+       internal_f.f_nscns++;
+ 
++      /* Coverity flags this strncpy as possibly creating a string
++	 that is not NUL terminated.  This is in fact OK.  */
++      /* coverity[buffer_size_warning: FALSE] */
+       strncpy (section.s_name, current->name, SCNNMLEN);
+ 
+ #ifdef COFF_LONG_SECTION_NAMES
+@@ -3775,6 +3778,9 @@ coff_write_object_contents (bfd * abfd)
+ 		 buffer, just in case.  */
+ 	      sprintf (s_name_buf, "/%lu", (unsigned long) string_size);
+ 	      /* Then strncpy takes care of any padding for us.  */
++	      /* Coverity flags this strncpy as possibly creating a string
++		 that is not NUL terminated.  This is in fact OK.  */
++	      /* coverity[buffer_size_warning: FALSE] */
+ 	      strncpy (section.s_name, s_name_buf, SCNNMLEN);
+ 	      string_size += len + 1;
+ 	      long_section_names = TRUE;
+diff -rup binutils.orig/bfd/coffgen.c binutils-2.30/bfd/coffgen.c
+--- binutils.orig/bfd/coffgen.c	2019-10-07 15:49:37.845629069 +0100
++++ binutils-2.30/bfd/coffgen.c	2019-10-07 15:53:46.443969714 +0100
+@@ -923,6 +923,9 @@ coff_fix_symbol_name (bfd *abfd,
+     {
+       if (name_length <= SYMNMLEN && !bfd_coff_force_symnames_in_strings (abfd))
+ 	/* This name will fit into the symbol neatly.  */
++	/* Coverity flags this strncpy as possibly creating a string
++	   that is not NUL terminated.  This is in fact OK.  */
++	/* coverity[buffer_size_warning: FALSE] */
+ 	strncpy (native->u.syment._n._n_name, symbol->name, SYMNMLEN);
+ 
+       else if (!bfd_coff_symname_in_debug (abfd, &native->u.syment))
+diff -rup binutils.orig/bfd/cofflink.c binutils-2.30/bfd/cofflink.c
+--- binutils.orig/bfd/cofflink.c	2019-10-07 15:49:37.565630938 +0100
++++ binutils-2.30/bfd/cofflink.c	2019-10-07 15:54:21.177736099 +0100
+@@ -2633,6 +2633,9 @@ _bfd_coff_write_global_sym (struct bfd_h
+     }
+ 
+   if (strlen (h->root.root.string) <= SYMNMLEN)
++    /* Coverity flags this strncpy as possibly creating a string
++       that is not NUL terminated.  This is in fact OK.  */
++    /* coverity[buffer_size_warning: FALSE] */
+     strncpy (isym._n._n_name, h->root.root.string, SYMNMLEN);
+   else
+     {
+diff -rup binutils.orig/bfd/elf64-x86-64.c binutils-2.30/bfd/elf64-x86-64.c
+--- binutils.orig/bfd/elf64-x86-64.c	2019-10-07 15:49:38.144627073 +0100
++++ binutils-2.30/bfd/elf64-x86-64.c	2019-10-07 15:56:53.559674302 +0100
+@@ -463,7 +463,13 @@ elf_x86_64_write_core_note (bfd *abfd, c
+ 	{
+ 	  prpsinfo32_t data;
+ 	  memset (&data, 0, sizeof (data));
++	  /* Coverity flags this strncpy as possibly creating a string
++	     that is not NUL terminated.  This is in fact OK.  */
++	  /* coverity[buffer_size_warning: FALSE] */
+ 	  strncpy (data.pr_fname, fname, sizeof (data.pr_fname));
++	  /* Coverity flags this strncpy as possibly creating a string
++	     that is not NUL terminated.  This is in fact OK.  */
++	  /* coverity[buffer_size_warning: FALSE] */
+ 	  strncpy (data.pr_psargs, psargs, sizeof (data.pr_psargs));
+ 	  return elfcore_write_note (abfd, buf, bufsiz, "CORE", note_type,
+ 				     &data, sizeof (data));
+@@ -472,7 +478,13 @@ elf_x86_64_write_core_note (bfd *abfd, c
+ 	{
+ 	  prpsinfo64_t data;
+ 	  memset (&data, 0, sizeof (data));
++	  /* Coverity flags this strncpy as possibly creating a string
++	     that is not NUL terminated.  This is in fact OK.  */
++	  /* coverity[buffer_size_warning: FALSE] */
+ 	  strncpy (data.pr_fname, fname, sizeof (data.pr_fname));
++	  /* Coverity flags this strncpy as possibly creating a string
++	     that is not NUL terminated.  This is in fact OK.  */
++	  /* coverity[buffer_size_warning: FALSE] */
+ 	  strncpy (data.pr_psargs, psargs, sizeof (data.pr_psargs));
+ 	  return elfcore_write_note (abfd, buf, bufsiz, "CORE", note_type,
+ 				     &data, sizeof (data));
+diff -rup binutils.orig/bfd/elf.c binutils-2.30/bfd/elf.c
+--- binutils.orig/bfd/elf.c	2019-10-07 15:49:37.616630597 +0100
++++ binutils-2.30/bfd/elf.c	2019-10-07 15:56:16.776930603 +0100
+@@ -10549,7 +10549,13 @@ elfcore_write_prpsinfo (bfd  *abfd,
+ #endif
+ 
+       memset (&data, 0, sizeof (data));
++      /* Coverity flags this strncpy as possibly creating a string
++	 that is not NUL terminated.  This is in fact OK.  */
++      /* coverity[buffer_size_warning: FALSE] */
+       strncpy (data.pr_fname, fname, sizeof (data.pr_fname));
++      /* Coverity flags this strncpy as possibly creating a string
++	 that is not NUL terminated.  This is in fact OK.  */
++      /* coverity[buffer_size_warning: FALSE] */
+       strncpy (data.pr_psargs, psargs, sizeof (data.pr_psargs));
+       return elfcore_write_note (abfd, buf, bufsiz,
+ 				 "CORE", note_type, &data, sizeof (data));
+@@ -10566,7 +10572,13 @@ elfcore_write_prpsinfo (bfd  *abfd,
+ #endif
+ 
+       memset (&data, 0, sizeof (data));
++      /* Coverity flags this strncpy as possibly creating a string
++	 that is not NUL terminated.  This is in fact OK.  */
++      /* coverity[buffer_size_warning: FALSE] */
+       strncpy (data.pr_fname, fname, sizeof (data.pr_fname));
++      /* Coverity flags this strncpy as possibly creating a string
++	 that is not NUL terminated.  This is in fact OK.  */
++      /* coverity[buffer_size_warning: FALSE] */
+       strncpy (data.pr_psargs, psargs, sizeof (data.pr_psargs));
+       return elfcore_write_note (abfd, buf, bufsiz,
+ 				 "CORE", note_type, &data, sizeof (data));
+diff -rup binutils.orig/bfd/elf-linux-core.h binutils-2.30/bfd/elf-linux-core.h
+--- binutils.orig/bfd/elf-linux-core.h	2019-10-07 15:49:37.744629743 +0100
++++ binutils-2.30/bfd/elf-linux-core.h	2019-10-07 15:55:43.976159158 +0100
+@@ -69,7 +69,13 @@ swap_linux_prpsinfo32_ugid32_out
+   bfd_put_32 (obfd, from->pr_ppid, to->pr_ppid);
+   bfd_put_32 (obfd, from->pr_pgrp, to->pr_pgrp);
+   bfd_put_32 (obfd, from->pr_sid, to->pr_sid);
++  /* Coverity flags this strncpy as possibly creating a string
++     that is not NUL terminated.  This is in fact OK.  */
++  /* coverity[buffer_size_warning: FALSE] */
+   strncpy (to->pr_fname, from->pr_fname, sizeof (to->pr_fname));
++  /* Coverity flags this strncpy as possibly creating a string
++     that is not NUL terminated.  This is in fact OK.  */
++  /* coverity[buffer_size_warning: FALSE] */
+   strncpy (to->pr_psargs, from->pr_psargs, sizeof (to->pr_psargs));
+ }
+ 
+@@ -121,7 +127,13 @@ swap_linux_prpsinfo32_ugid16_out
+   bfd_put_32 (obfd, from->pr_ppid, to->pr_ppid);
+   bfd_put_32 (obfd, from->pr_pgrp, to->pr_pgrp);
+   bfd_put_32 (obfd, from->pr_sid, to->pr_sid);
++  /* Coverity flags this strncpy as possibly creating a string
++     that is not NUL terminated.  This is in fact OK.  */
++  /* coverity[buffer_size_warning: FALSE] */
+   strncpy (to->pr_fname, from->pr_fname, sizeof (to->pr_fname));
++  /* Coverity flags this strncpy as possibly creating a string
++     that is not NUL terminated.  This is in fact OK.  */
++  /* coverity[buffer_size_warning: FALSE] */
+   strncpy (to->pr_psargs, from->pr_psargs, sizeof (to->pr_psargs));
+ }
+ 
+@@ -174,7 +186,13 @@ swap_linux_prpsinfo64_ugid32_out
+   bfd_put_32 (obfd, from->pr_ppid, to->pr_ppid);
+   bfd_put_32 (obfd, from->pr_pgrp, to->pr_pgrp);
+   bfd_put_32 (obfd, from->pr_sid, to->pr_sid);
++  /* Coverity flags this strncpy as possibly creating a string
++     that is not NUL terminated.  This is in fact OK.  */
++  /* coverity[buffer_size_warning: FALSE] */
+   strncpy (to->pr_fname, from->pr_fname, sizeof (to->pr_fname));
++  /* Coverity flags this strncpy as possibly creating a string
++     that is not NUL terminated.  This is in fact OK.  */
++  /* coverity[buffer_size_warning: FALSE] */
+   strncpy (to->pr_psargs, from->pr_psargs, sizeof (to->pr_psargs));
+ }
+ 
+@@ -227,7 +245,13 @@ swap_linux_prpsinfo64_ugid16_out
+   bfd_put_32 (obfd, from->pr_ppid, to->pr_ppid);
+   bfd_put_32 (obfd, from->pr_pgrp, to->pr_pgrp);
+   bfd_put_32 (obfd, from->pr_sid, to->pr_sid);
++  /* Coverity flags this strncpy as possibly creating a string
++     that is not NUL terminated.  This is in fact OK.  */
++  /* coverity[buffer_size_warning: FALSE] */
+   strncpy (to->pr_fname, from->pr_fname, sizeof (to->pr_fname));
++  /* Coverity flags this strncpy as possibly creating a string
++     that is not NUL terminated.  This is in fact OK.  */
++  /* coverity[buffer_size_warning: FALSE] */
+   strncpy (to->pr_psargs, from->pr_psargs, sizeof (to->pr_psargs));
+ }
+ 
+diff -rup binutils.orig/bfd/peXXigen.c binutils-2.30/bfd/peXXigen.c
+--- binutils.orig/bfd/peXXigen.c	2019-10-07 15:49:37.695630070 +0100
++++ binutils-2.30/bfd/peXXigen.c	2019-10-07 16:02:02.117524278 +0100
+@@ -385,7 +385,7 @@ _bfd_XXi_swap_aux_out (bfd *  abfd,
+ 	  H_PUT_32 (abfd, in->x_file.x_n.x_offset, ext->x_file.x_n.x_offset);
+ 	}
+       else
+-	memcpy (ext->x_file.x_fname, in->x_file.x_fname, FILNMLEN);
++	memcpy (ext->x_file.x_fname, in->x_file.x_fname, E_FILNMLEN);
+ 
+       return AUXESZ;
+ 
+diff -rup binutils.orig/ld/pe-dll.c binutils-2.30/ld/pe-dll.c
+--- binutils.orig/ld/pe-dll.c	2019-10-07 15:48:49.851949423 +0100
++++ binutils-2.30/ld/pe-dll.c	2019-10-07 16:04:09.055639773 +0100
+@@ -2929,7 +2929,7 @@ pe_find_cdecl_alias_match (struct bfd_li
+ 	  if (pe_details->underscored)
+ 	    lname[0] = '_';
+ 	  else
+-	    strcpy (lname, lname + 1);
++	    memmove (lname, lname + 1, strlen (lname) + 1);
+ 	  key.key = lname;
+ 	  kv = bsearch (&key, udef_table, undef_count,
+ 			sizeof (struct key_value), undef_sort_cmp);
+diff -rup binutils.orig/libiberty/sha1.c binutils-2.30/libiberty/sha1.c
+--- binutils.orig/libiberty/sha1.c	2019-10-07 15:49:37.016634602 +0100
++++ binutils-2.30/libiberty/sha1.c	2019-10-07 16:04:41.788411691 +0100
+@@ -258,7 +258,7 @@ sha1_process_bytes (const void *buffer,
+ 	{
+ 	  sha1_process_block (ctx->buffer, 64, ctx);
+ 	  left_over -= 64;
+-	  memcpy (ctx->buffer, &ctx->buffer[16], left_over);
++	  memmove (ctx->buffer, &ctx->buffer[16], left_over);
+ 	}
+       ctx->buflen = left_over;
+     }
+diff -rup binutils.orig/bfd/cofflink.c binutils-2.30/bfd/cofflink.c
+--- binutils.orig/bfd/cofflink.c	2019-10-07 17:01:58.787679337 +0100
++++ binutils-2.30/bfd/cofflink.c	2019-10-07 17:02:20.641529805 +0100
+@@ -1406,6 +1406,8 @@ mark_relocs (struct coff_final_link_info
+       for (; irel < irelend; irel++)
+ 	if ((unsigned long) irel->r_symndx < obj_raw_syment_count (input_bfd))
+ 	  flaginfo->sym_indices[irel->r_symndx] = -1;
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+     }
+ }
+ 
+diff -rup binutils.orig/bfd/doc/chew.c binutils-2.30/bfd/doc/chew.c
+--- binutils.orig/bfd/doc/chew.c	2019-10-07 17:01:58.796679276 +0100
++++ binutils-2.30/bfd/doc/chew.c	2019-10-07 17:04:21.265720634 +0100
+@@ -1264,6 +1264,7 @@ free_words (void)
+ 	    if (ptr->code[i] == push_text
+ 		&& ptr->code[i + 1])
+ 	      {
++		/* coverity[fnptr_free: FALSE] */
+ 		free (ptr->code[i + 1] - 1);
+ 		++ i;
+ 	      }
+@@ -1387,6 +1388,7 @@ compile (string)
+ 	  ptr = newentry (word);
+ 	  string = nextword (string, &word);
+ 	  
++	  /* coverity[use_after_free: FALSE] */
+ 	  while (word[0] != ';')
+ 	    {
+ 	      switch (word[0])
+diff -rup binutils.orig/bfd/elflink.c binutils-2.30/bfd/elflink.c
+--- binutils.orig/bfd/elflink.c	2019-10-07 17:01:58.779679392 +0100
++++ binutils-2.30/bfd/elflink.c	2019-10-07 17:04:57.025483171 +0100
+@@ -10579,6 +10579,8 @@ elf_link_input_bfd (struct elf_final_lin
+ 			   "that references a non-existent global symbol"),
+ 			 input_bfd, rel->r_info, o);
+ 		      bfd_set_error (bfd_error_bad_value);
++		      /* There is a potential resource leak here, but it is not important.  */
++		      /* coverity[leaked_storage: FALSE] */
+ 		      return FALSE;
+ 		    }
+ 
+diff -rup binutils.orig/bfd/peXXigen.c binutils-2.30/bfd/peXXigen.c
+--- binutils.orig/bfd/peXXigen.c	2019-10-07 17:01:58.784679358 +0100
++++ binutils-2.30/bfd/peXXigen.c	2019-10-07 17:07:22.047520136 +0100
+@@ -385,7 +385,9 @@ _bfd_XXi_swap_aux_out (bfd *  abfd,
+ 	  H_PUT_32 (abfd, in->x_file.x_n.x_offset, ext->x_file.x_n.x_offset);
+ 	}
+       else
+-	memcpy (ext->x_file.x_fname, in->x_file.x_fname, E_FILNMLEN);
++	/* Coverity gets confused about the size of these buffers.  */
++	/* coverity[buffer_size: FALSE] */
++	memcpy (ext->x_file.x_fname, in->x_file.x_fname, FILNMLEN);
+ 
+       return AUXESZ;
+ 
+@@ -4343,6 +4345,8 @@ rsrc_process_section (bfd * abfd,
+   /* FIXME: Free the resource tree, if we have one.  */
+   free (datastart);
+   free (rsrc_sizes);
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+ }
+ 
+ /* Handle the .idata section and other things that need symbol table
+diff -rup binutils.orig/bfd/plugin.c binutils-2.30/bfd/plugin.c
+--- binutils.orig/bfd/plugin.c	2019-10-07 17:01:58.780679385 +0100
++++ binutils-2.30/bfd/plugin.c	2019-10-07 17:07:45.871361935 +0100
+@@ -403,9 +403,13 @@ try_load_plugin (const char *pname, bfd
+ 
+   abfd->plugin_format = bfd_plugin_yes;
+ 
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+   return 1;
+ 
+  err:
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+   return 0;
+ }
+ 
+diff -rup binutils.orig/bfd/stabs.c binutils-2.30/bfd/stabs.c
+--- binutils.orig/bfd/stabs.c	2019-10-07 17:01:58.778679399 +0100
++++ binutils-2.30/bfd/stabs.c	2019-10-07 17:08:14.655170795 +0100
+@@ -377,6 +377,8 @@ _bfd_link_section_stabs (bfd *abfd,
+ 	  amt = sizeof *ne;
+ 	  ne = (struct stab_excl_list *) bfd_alloc (abfd, amt);
+ 	  if (ne == NULL)
++	    /* There is a potential resource leak here, but it is not important.  */
++	    /* coverity[leaked_storage: FALSE] */
+ 	    goto error_return;
+ 	  ne->offset = sym - stabbuf;
+ 	  ne->val = sum_chars;
+diff -rup binutils.orig/binutils/ar.c binutils-2.30/binutils/ar.c
+--- binutils.orig/binutils/ar.c	2019-10-07 17:01:57.998684736 +0100
++++ binutils-2.30/binutils/ar.c	2019-10-07 17:10:18.109350993 +0100
+@@ -228,6 +228,8 @@ map_over_members (bfd *arch, void (*func
+ 	      filename = normalize (filename, arch);
+ 	    }
+ 
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  if (filename != NULL
+ 	      && !FILENAME_CMP (normalize (*files, arch), filename))
+ 	    {
+@@ -237,6 +239,8 @@ map_over_members (bfd *arch, void (*func
+ 		{
+ 		  /* Counting, and didn't match on count; go on to the
+                      next one.  */
++		  /* There is a potential resource leak here, but it is not important.  */
++		  /* coverity[leaked_storage: FALSE] */
+ 		  continue;
+ 		}
+ 
+@@ -250,6 +254,8 @@ map_over_members (bfd *arch, void (*func
+ 		 to the ar command.  */
+ 	      break;
+ 	    }
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	}
+ 
+       if (!found)
+@@ -1268,6 +1274,8 @@ delete_members (bfd *arch, char **files_
+       current_ptr_ptr = &(arch->archive_next);
+       while (*current_ptr_ptr)
+ 	{
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  if (FILENAME_CMP (normalize (*files_to_delete, arch),
+ 			    (*current_ptr_ptr)->filename) == 0)
+ 	    {
+@@ -1323,6 +1331,8 @@ move_members (bfd *arch, char **files_to
+       while (*current_ptr_ptr)
+ 	{
+ 	  bfd *current_ptr = *current_ptr_ptr;
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  if (FILENAME_CMP (normalize (*files_to_move, arch),
+ 			    current_ptr->filename) == 0)
+ 	    {
+@@ -1375,6 +1385,8 @@ replace_members (bfd *arch, char **files
+ 
+ 	      /* For compatibility with existing ar programs, we
+ 		 permit the same file to be added multiple times.  */
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      if (FILENAME_CMP (normalize (*files_to_move, arch),
+ 				normalize (current->filename, arch)) == 0
+ 		  && current->arelt_data != NULL)
+diff -rup binutils.orig/binutils/arparse.c binutils-2.30/binutils/arparse.c
+--- binutils.orig/binutils/arparse.c	2019-10-07 17:01:58.003684702 +0100
++++ binutils-2.30/binutils/arparse.c	2019-10-07 17:10:55.998099392 +0100
+@@ -1193,6 +1193,8 @@ yyparse (void)
+ #  undef YYSTACK_RELOCATE
+         if (yyss1 != yyssa)
+           YYSTACK_FREE (yyss1);
++	/* There is a potential resource leak here, but it is not important.  */
++	/* coverity[leaked_storage: FALSE] */
+       }
+ # endif
+ #endif /* no yyoverflow */
+diff -rup binutils.orig/binutils/arsup.c binutils-2.30/binutils/arsup.c
+--- binutils.orig/binutils/arsup.c	2019-10-07 17:01:58.006684681 +0100
++++ binutils-2.30/binutils/arsup.c	2019-10-07 17:11:21.789928112 +0100
+@@ -209,6 +209,8 @@ ar_open (char *name, int t)
+       obfd->has_armap = 1;
+       obfd->is_thin_archive = 0;
+     }
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+ }
+ 
+ static void
+diff -rup binutils.orig/binutils/dwarf.c binutils-2.30/binutils/dwarf.c
+--- binutils.orig/binutils/dwarf.c	2019-10-07 17:01:57.958685010 +0100
++++ binutils-2.30/binutils/dwarf.c	2019-10-07 17:13:31.950063779 +0100
+@@ -4098,6 +4098,8 @@ display_debug_lines_decoded (struct dwar
+ 	      if (data == end)
+ 		{
+ 		  warn (_("Corrupt file name list\n"));
++		  /* There is a potential resource leak here, but it is not important.  */
++		  /* coverity[leaked_storage: FALSE] */
+ 		  break;
+ 		}
+ 
+@@ -4234,6 +4236,8 @@ display_debug_lines_decoded (struct dwar
+ 		    {
+ 		      warn (_("file table ends unexpectedly\n"));
+ 		      n_files = 0;
++		      /* There is a potential resource leak here, but it is not important.  */
++		      /* coverity[leaked_storage: FALSE] */
+ 		      break;
+ 		    }
+ 
+@@ -7231,6 +7235,8 @@ read_cie (unsigned char *start, unsigned
+   if (start == end)
+     {
+       warn (_("No terminator for augmentation name\n"));
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return start;
+     }
+ 
+@@ -7243,6 +7249,8 @@ read_cie (unsigned char *start, unsigned
+       if (fc->ptr_size < 1 || fc->ptr_size > 8)
+ 	{
+ 	  warn (_("Invalid pointer size (%d) in CIE data\n"), fc->ptr_size);
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return end;
+ 	}
+ 
+@@ -7251,6 +7259,8 @@ read_cie (unsigned char *start, unsigned
+       if (fc->segment_size > 8 || fc->segment_size + fc->ptr_size > 8)
+ 	{
+ 	  warn (_("Invalid segment size (%d) in CIE data\n"), fc->segment_size);
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return end;
+ 	}
+ 
+@@ -8305,6 +8315,8 @@ display_debug_frames (struct dwarf_secti
+ 
+   printf ("\n");
+ 
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+   return 1;
+ }
+ 
+@@ -9733,6 +9745,8 @@ load_separate_debug_info (const char *
+   if (debugfile == NULL)
+     {
+       warn (_("Out of memory"));
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return NULL;
+     }
+ 
+diff -rup binutils.orig/binutils/elfedit.c binutils-2.30/binutils/elfedit.c
+--- binutils.orig/binutils/elfedit.c	2019-10-07 17:01:58.000684722 +0100
++++ binutils-2.30/binutils/elfedit.c	2019-10-07 17:13:51.916931183 +0100
+@@ -468,6 +468,8 @@ process_archive (const char * file_name,
+         }
+ 
+       free (qualified_name);
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+     }
+ 
+  out:
+diff -rup binutils.orig/binutils/ieee.c binutils-2.30/binutils/ieee.c
+--- binutils.orig/binutils/ieee.c	2019-10-07 17:01:57.963684975 +0100
++++ binutils-2.30/binutils/ieee.c	2019-10-07 17:18:54.442922250 +0100
+@@ -1503,6 +1503,8 @@ parse_ieee_ty (struct ieee_info *info, c
+ 	    bfd_boolean present;
+ 
+ 	    if (! ieee_read_optional_id (info, pp, &name, &namlen, &present))
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 	    if (! present)
+ 	      break;
+@@ -1516,6 +1518,8 @@ parse_ieee_ty (struct ieee_info *info, c
+ 
+ 	    names[c] = savestring (name, namlen);
+ 	    if (names[c] == NULL)
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 	    ++c;
+ 	  }
+@@ -1554,12 +1558,16 @@ parse_ieee_ty (struct ieee_info *info, c
+ 	    bfd_vma bitpos, bitsize;
+ 
+ 	    if (! ieee_read_optional_id (info, pp, &name, &namlen, &present))
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 	    if (! present)
+ 	      break;
+ 	    if (! ieee_read_type_index (info, pp, &ftype)
+ 		|| ! ieee_read_number (info, pp, &bitpos)
+ 		|| ! ieee_read_number (info, pp, &bitsize))
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 
+ 	    if (c + 1 >= alloc)
+@@ -1573,6 +1581,8 @@ parse_ieee_ty (struct ieee_info *info, c
+ 					  ftype, bitpos, bitsize,
+ 					  DEBUG_VISIBILITY_PUBLIC);
+ 	    if (fields[c] == NULL)
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 	    ++c;
+ 	  }
+@@ -1604,10 +1614,14 @@ parse_ieee_ty (struct ieee_info *info, c
+ 	    bfd_vma val;
+ 
+ 	    if (! ieee_read_optional_id (info, pp, &name, &namlen, &present))
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 	    if (! present)
+ 	      break;
+ 	    if (! ieee_read_number (info, pp, &val))
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 
+ 	    /* If the length of the name is zero, then the value is
+@@ -1627,6 +1641,8 @@ parse_ieee_ty (struct ieee_info *info, c
+ 
+ 	    names[c] = savestring (name, namlen);
+ 	    if (names[c] == NULL)
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 	    vals[c] = (bfd_signed_vma) val;
+ 	    ++c;
+@@ -1646,6 +1662,8 @@ parse_ieee_ty (struct ieee_info *info, c
+ 	debug_type t;
+ 
+ 	if (! ieee_read_type_index (info, pp, &t))
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 	type = debug_make_pointer_type (dhandle, t);
+       }
+@@ -1660,6 +1678,8 @@ parse_ieee_ty (struct ieee_info *info, c
+ 	    || ! ieee_read_number (info, pp, &high)
+ 	    || ! ieee_read_number (info, pp, &signedp)
+ 	    || ! ieee_read_number (info, pp, &size))
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 
+ 	type = debug_make_range_type (dhandle,
+@@ -1679,6 +1699,8 @@ parse_ieee_ty (struct ieee_info *info, c
+ 	unsigned int c;
+ 
+ 	if (! ieee_read_number (info, pp, &size))
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 
+ 	alloc = 10;
+@@ -1695,11 +1717,15 @@ parse_ieee_ty (struct ieee_info *info, c
+ 	    bfd_vma bitsize;
+ 
+ 	    if (! ieee_read_optional_id (info, pp, &name, &namlen, &present))
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 	    if (! present)
+ 	      break;
+ 	    if (! ieee_read_number (info, pp, &tindx)
+ 		|| ! ieee_read_number (info, pp, &offset))
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 
+ 	    if (tindx < 256)
+@@ -1733,6 +1759,8 @@ parse_ieee_ty (struct ieee_info *info, c
+ 					  ftype, offset, bitsize,
+ 					  DEBUG_VISIBILITY_PUBLIC);
+ 	    if (fields[c] == NULL)
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 	    ++c;
+ 	  }
+@@ -1747,6 +1775,8 @@ parse_ieee_ty (struct ieee_info *info, c
+     case 'T':
+       /* Typedef.  */
+       if (! ieee_read_type_index (info, pp, &type))
++	/* There is a potential resource leak here, but it is not important.  */
++	/* coverity[leaked_storage: FALSE] */
+ 	return FALSE;
+       typdef = TRUE;
+       break;
+@@ -1766,6 +1796,8 @@ parse_ieee_ty (struct ieee_info *info, c
+ 	if (! ieee_read_number (info, pp, &attr)
+ 	    || ! ieee_read_type_index (info, pp, &rtype)
+ 	    || ! ieee_read_number (info, pp, &nargs))
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 	do
+ 	  {
+@@ -1773,6 +1805,8 @@ parse_ieee_ty (struct ieee_info *info, c
+ 	    unsigned long namlen;
+ 
+ 	    if (! ieee_read_optional_id (info, pp, &name, &namlen, &present))
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 	  }
+ 	while (present);
+@@ -1810,6 +1844,8 @@ parse_ieee_ty (struct ieee_info *info, c
+ 
+ 	if (! ieee_read_type_index (info, pp, &etype)
+ 	    || ! ieee_read_number (info, pp, &high))
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 
+ 	type = debug_make_array_type (dhandle, etype,
+@@ -1829,6 +1865,8 @@ parse_ieee_ty (struct ieee_info *info, c
+ 	/* FIXME: I don't know what the name means.  */
+ 
+ 	if (! ieee_read_id (info, pp, &name, &namlen))
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 
+ 	type = debug_make_complex_type (dhandle, tc == 'c' ? 4 : 8);
+@@ -1838,6 +1876,8 @@ parse_ieee_ty (struct ieee_info *info, c
+     case 'f':
+       /* Pascal file name.  FIXME.  */
+       ieee_error (info, ty_code_start, _("Pascal file name not supported"));
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return FALSE;
+ 
+     case 'g':
+@@ -1849,12 +1889,16 @@ parse_ieee_ty (struct ieee_info *info, c
+ 
+ 	if (! ieee_read_number (info, pp, &signedp)
+ 	    || ! ieee_read_number (info, pp, &bitsize))
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 
+ 	/* I think the documentation says that there is a type index,
+            but some actual files do not have one.  */
+ 	hold = *pp;
+ 	if (! ieee_read_optional_number (info, pp, &dummy, &present))
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 	if (! present)
+ 	  {
+@@ -1866,6 +1910,8 @@ parse_ieee_ty (struct ieee_info *info, c
+ 	  {
+ 	    *pp = hold;
+ 	    if (! ieee_read_type_index (info, pp, &type))
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 	  }
+ 	type_bitsize = bitsize;
+@@ -1880,12 +1926,16 @@ parse_ieee_ty (struct ieee_info *info, c
+ 
+ 	if (! ieee_read_number (info, pp, &kind)
+ 	    || ! ieee_read_type_index (info, pp, &t))
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 
+ 	switch (kind)
+ 	  {
+ 	  default:
+ 	    ieee_error (info, ty_start, _("unsupported qualifier"));
++	    /* There is a potential resource leak here, but it is not important.  */
++	    /* coverity[leaked_storage: FALSE] */
+ 	    return FALSE;
+ 
+ 	  case 1:
+@@ -1907,6 +1957,8 @@ parse_ieee_ty (struct ieee_info *info, c
+ 
+ 	if (! ieee_read_number (info, pp, &size)
+ 	    || ! ieee_read_type_index (info, pp, &etype))
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 
+ 	/* FIXME: We ignore the size.  */
+@@ -1934,6 +1986,8 @@ parse_ieee_ty (struct ieee_info *info, c
+ 	    || ! ieee_read_number (info, pp, &push_mask)
+ 	    || ! ieee_read_type_index (info, pp, &rtype)
+ 	    || ! ieee_read_number (info, pp, &nargs))
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 	if (nargs == (bfd_vma) -1)
+ 	  {
+@@ -1948,6 +2002,8 @@ parse_ieee_ty (struct ieee_info *info, c
+ 			 xmalloc ((nargs + 1) * sizeof *arg_types));
+ 	    for (i = 0; i < nargs; i++)
+ 	      if (! ieee_read_type_index (info, pp, arg_types + i))
++		/* There is a potential resource leak here, but it is not important.  */
++		/* coverity[leaked_storage: FALSE] */
+ 		return FALSE;
+ 
+ 	    /* If the last type is pointer to void, this is really a
+@@ -1995,6 +2051,8 @@ parse_ieee_ty (struct ieee_info *info, c
+ 	  }
+ 	if (! ieee_read_number (info, pp, &level)
+ 	    || ! ieee_read_optional_number (info, pp, &father, &present))
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 
+ 	/* We can't distinguish between a global function and a static
+diff -rup binutils.orig/binutils/objcopy.c binutils-2.30/binutils/objcopy.c
+--- binutils.orig/binutils/objcopy.c	2019-10-07 17:01:58.036684476 +0100
++++ binutils-2.30/binutils/objcopy.c	2019-10-07 17:26:39.304812562 +0100
+@@ -1142,6 +1142,8 @@ add_specific_symbols (const char *filena
+       line = eol;
+       line_count ++;
+     }
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+ }
+ 
+ /* See whether a symbol should be stripped or kept
+@@ -1817,6 +1819,8 @@ add_redefine_syms_file (const char *file
+     fatal (_("%s:%d: premature end of file"), filename, lineno);
+ 
+   free (buf);
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+ }
+ 
+ /* Copy unknown object file IBFD onto OBFD.
+@@ -2855,6 +2859,8 @@ copy_object (bfd *ibfd, bfd *obfd, const
+ 			     strerror (errno));
+ 		  free (contents);
+ 		  return FALSE;
++		  /* There is a potential resource leak here, but it is not important.  */
++		  /* coverity[leaked_storage: FALSE] */
+ 		}
+ 	    }
+ 	  else
+@@ -3063,6 +3069,8 @@ copy_object (bfd *ibfd, bfd *obfd, const
+ 	    {
+ 	      status = 1;
+ 	      return FALSE;
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	    }
+ 	}
+ 
+@@ -3097,6 +3105,8 @@ copy_object (bfd *ibfd, bfd *obfd, const
+ 					  0, padd->size))
+ 	    {
+ 	      bfd_nonfatal_message (NULL, obfd, padd->section, NULL);
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 	    }
+ 	}
+@@ -3115,6 +3125,8 @@ copy_object (bfd *ibfd, bfd *obfd, const
+ 					  0, pupdate->size))
+ 	    {
+ 	      bfd_nonfatal_message (NULL, obfd, osec, NULL);
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 	    }
+ 	}
+@@ -3128,6 +3140,8 @@ copy_object (bfd *ibfd, bfd *obfd, const
+ 	  if (! bfd_set_section_contents (obfd, osec, merged_notes, 0, merged_size))
+ 	    {
+ 	      bfd_nonfatal_message (NULL, obfd, osec, _("error: failed to copy merged notes into output"));
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 	    }
+ 	}
+@@ -3146,6 +3160,8 @@ copy_object (bfd *ibfd, bfd *obfd, const
+ 	  bfd_nonfatal_message (NULL, obfd, NULL,
+ 				_("cannot fill debug link section `%s'"),
+ 				gnu_debuglink_filename);
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 	}
+     }
+@@ -3184,6 +3200,8 @@ copy_object (bfd *ibfd, bfd *obfd, const
+ 						  off, now))
+ 		    {
+ 		      bfd_nonfatal_message (NULL, obfd, osections[i], NULL);
++		      /* There is a potential resource leak here, but it is not important.  */
++		      /* coverity[leaked_storage: FALSE] */
+ 		      return FALSE;
+ 		    }
+ 
+@@ -3202,6 +3220,8 @@ copy_object (bfd *ibfd, bfd *obfd, const
+     {
+       bfd_nonfatal_message (NULL, obfd, NULL,
+ 			    _("error copying private BFD data"));
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return FALSE;
+     }
+ 
+@@ -3224,6 +3244,8 @@ copy_object (bfd *ibfd, bfd *obfd, const
+ 	}
+     }
+ 
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+   return TRUE;
+ }
+ 
+@@ -3302,6 +3324,7 @@ copy_archive (bfd *ibfd, bfd *obfd, cons
+       /* If the file already exists, make another temp dir.  */
+       if (stat (output_name, &buf) >= 0)
+ 	{
++	  free (output_name);
+ 	  output_name = make_tempdir (output_name);
+ 	  if (output_name == NULL)
+ 	    {
+@@ -3435,6 +3458,7 @@ copy_archive (bfd *ibfd, bfd *obfd, cons
+     }
+ 
+   rmdir (dir);
++  free (dir);
+ }
+ 
+ static void
+@@ -4310,6 +4334,8 @@ write_debugging_info (bfd *obfd, void *d
+ 	{
+ 	  bfd_nonfatal_message (NULL, obfd, NULL,
+ 				_("can't create debugging section"));
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 	}
+ 
+@@ -4323,6 +4349,8 @@ write_debugging_info (bfd *obfd, void *d
+ 	{
+ 	  bfd_nonfatal_message (NULL, obfd, NULL,
+ 				_("can't set debugging section contents"));
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 	}
+ 
+@@ -5569,6 +5597,8 @@ copy_main (int argc, char *argv[])
+ 	}
+     }
+ 
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+   return 0;
+ }
+ 
+diff -rup binutils-2.30/binutils/ieee.c binutils.new/binutils/ieee.c
+--- binutils-2.30/binutils/ieee.c	2019-10-08 10:20:47.186432611 +0100
++++ binutils.new/binutils/ieee.c	2019-10-08 10:20:33.515525367 +0100
+@@ -2661,13 +2661,18 @@ ieee_read_cxx_class (struct ieee_info *i
+       spec_start = *pp;
+ 
+       if (! ieee_require_asn (info, pp, &id))
++	/* There is a potential resource leak here, but it is not important.  */
++	/* coverity[leaked_storage: FALSE] */
+ 	return FALSE;
++
+       --count;
+ 
+       switch (id)
+ 	{
+ 	default:
+ 	  ieee_error (info, spec_start, _("unrecognized C++ object spec"));
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 
+ 	case 'b':
+@@ -2704,6 +2709,8 @@ ieee_read_cxx_class (struct ieee_info *i
+ 	    if ((fieldlen == 0) == (cinline == 0))
+ 	      {
+ 		ieee_error (info, start, _("unsupported C++ object type"));
++		/* There is a potential resource leak here, but it is not important.  */
++		/* coverity[leaked_storage: FALSE] */
+ 		return FALSE;
+ 	      }
+ 
+@@ -2887,12 +2894,16 @@ ieee_read_cxx_class (struct ieee_info *i
+ 		  }
+ 	      }
+ 	    if (ftype == DEBUG_TYPE_NULL)
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 
+ 	    switch (flags & CXXFLAGS_VISIBILITY)
+ 	      {
+ 	      default:
+ 		ieee_error (info, start, _("unknown C++ visibility"));
++		/* There is a potential resource leak here, but it is not important.  */
++		/* coverity[leaked_storage: FALSE] */
+ 		return FALSE;
+ 
+ 	      case CXXFLAGS_VISIBILITY_PUBLIC:
+@@ -2927,6 +2938,8 @@ ieee_read_cxx_class (struct ieee_info *i
+ 		if (bitpos == (bfd_vma) -1 || bitsize == (bfd_vma) -1)
+ 		  {
+ 		    ieee_error (info, start, _("bad C++ field bit pos or size"));
++		    /* There is a potential resource leak here, but it is not important.  */
++		    /* coverity[leaked_storage: FALSE] */
+ 		    return FALSE;
+ 		  }
+ 		field = debug_make_field (dhandle, fieldcopy, ftype, bitpos,
+@@ -3043,6 +3056,8 @@ ieee_read_cxx_class (struct ieee_info *i
+ 	      {
+ 	      default:
+ 		ieee_error (info, start, _("unknown C++ visibility"));
++		/* There is a potential resource leak here, but it is not important.  */
++		/* coverity[leaked_storage: FALSE] */
+ 		return FALSE;
+ 
+ 	      case CXXFLAGS_VISIBILITY_PUBLIC:
+@@ -3229,6 +3244,8 @@ ieee_read_cxx_class (struct ieee_info *i
+ 	  dmethods[i] = debug_make_method (dhandle, namcopy,
+ 					   methods[i].variants);
+ 	  if (dmethods[i] == DEBUG_METHOD_NULL)
++	    /* There is a potential resource leak here, but it is not important.  */
++	    /* coverity[leaked_storage: FALSE] */
+ 	    return FALSE;
+ 	}
+       dmethods[i] = DEBUG_METHOD_NULL;
+diff -rup binutils-2.30/binutils/objcopy.c binutils.new/binutils/objcopy.c
+--- binutils-2.30/binutils/objcopy.c	2019-10-08 10:20:47.186432611 +0100
++++ binutils.new/binutils/objcopy.c	2019-10-08 10:20:33.513525381 +0100
+@@ -2858,9 +2858,9 @@ copy_object (bfd *ibfd, bfd *obfd, const
+ 			     pdump->filename,
+ 			     strerror (errno));
+ 		  free (contents);
+-		  return FALSE;
+ 		  /* There is a potential resource leak here, but it is not important.  */
+ 		  /* coverity[leaked_storage: FALSE] */
++		  return FALSE;
+ 		}
+ 	    }
+ 	  else
+@@ -3068,9 +3068,9 @@ copy_object (bfd *ibfd, bfd *obfd, const
+ 	  if (bfd_get_error () != bfd_error_no_error)
+ 	    {
+ 	      status = 1;
+-	      return FALSE;
+ 	      /* There is a potential resource leak here, but it is not important.  */
+ 	      /* coverity[leaked_storage: FALSE] */
++	      return FALSE;
+ 	    }
+ 	}
+ 
+@@ -3083,6 +3083,8 @@ copy_object (bfd *ibfd, bfd *obfd, const
+       if (! write_debugging_info (obfd, dhandle, &symcount, &osympp))
+ 	{
+ 	  status = 1;
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 	}
+     }
+@@ -3210,6 +3212,8 @@ copy_object (bfd *ibfd, bfd *obfd, const
+ 		}
+ 	    }
+ 	}
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+     }
+ 
+   /* Allow the BFD backend to copy any private data it understands
+@@ -3324,8 +3328,10 @@ copy_archive (bfd *ibfd, bfd *obfd, cons
+       /* If the file already exists, make another temp dir.  */
+       if (stat (output_name, &buf) >= 0)
+ 	{
++	  char * on;
++	  on = make_tempdir (output_name);
+ 	  free (output_name);
+-	  output_name = make_tempdir (output_name);
++	  output_name = on;
+ 	  if (output_name == NULL)
+ 	    {
+ 	      non_fatal (_("cannot create tempdir for archive copying (error: %s)"),
+diff -rup binutils-2.30/binutils/rdcoff.c binutils.new/binutils/rdcoff.c
+--- binutils-2.30/binutils/rdcoff.c	2018-01-13 13:31:15.000000000 +0000
++++ binutils.new/binutils/rdcoff.c	2019-10-08 10:20:33.512525387 +0100
+@@ -409,6 +409,8 @@ parse_coff_struct_type (bfd *abfd, struc
+ 	{
+ 	  non_fatal (_("bfd_coff_get_syment failed: %s"),
+ 		     bfd_errmsg (bfd_get_error ()));
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return DEBUG_TYPE_NULL;
+ 	}
+ 
+@@ -425,6 +427,8 @@ parse_coff_struct_type (bfd *abfd, struc
+ 	    {
+ 	      non_fatal (_("bfd_coff_get_auxent failed: %s"),
+ 			 bfd_errmsg (bfd_get_error ()));
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return DEBUG_TYPE_NULL;
+ 	    }
+ 	  psubaux = &auxent;
+@@ -514,6 +518,8 @@ parse_coff_enum_type (bfd *abfd, struct
+ 	{
+ 	  non_fatal (_("bfd_coff_get_syment failed: %s"),
+ 		     bfd_errmsg (bfd_get_error ()));
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return DEBUG_TYPE_NULL;
+ 	}
+ 
+diff -rup binutils-2.30/binutils/readelf.c binutils.new/binutils/readelf.c
+--- binutils-2.30/binutils/readelf.c	2019-10-08 10:20:47.161432781 +0100
++++ binutils.new/binutils/readelf.c	2019-10-08 10:20:33.507525422 +0100
+@@ -5304,6 +5304,8 @@ get_32bit_section_headers (Filedata * fi
+     {
+       if (!probe)
+ 	error (_("Out of memory reading %u section headers\n"), num);
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return FALSE;
+     }
+ 
+@@ -5370,6 +5372,8 @@ get_64bit_section_headers (Filedata * fi
+     {
+       if (! probe)
+ 	error (_("Out of memory reading %u section headers\n"), num);
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return FALSE;
+     }
+ 
+@@ -5456,6 +5460,7 @@ get_32bit_elf_symbols (Filedata *
+     for (entry = symtab_shndx_list; entry != NULL; entry = entry->next)
+       if (entry->hdr->sh_link == (unsigned long) (section - filedata->section_headers))
+ 	{
++	  free (shndx);
+ 	  shndx = (Elf_External_Sym_Shndx *) get_data (NULL, filedata,
+ 						       entry->hdr->sh_offset,
+ 						       1, entry->hdr->sh_size,
+@@ -5569,6 +5574,7 @@ get_64bit_elf_symbols (Filedata *
+     for (entry = symtab_shndx_list; entry != NULL; entry = entry->next)
+       if (entry->hdr->sh_link == (unsigned long) (section - filedata->section_headers))
+ 	{
++	  free (shndx);
+ 	  shndx = (Elf_External_Sym_Shndx *) get_data (NULL, filedata,
+ 						       entry->hdr->sh_offset,
+ 						       1, entry->hdr->sh_size,
+@@ -9647,6 +9653,7 @@ process_dynamic_section (Filedata * file
+ 	    section.sh_entsize = sizeof (Elf64_External_Sym);
+ 	  section.sh_name = filedata->string_table_length;
+ 
++	  free (dynamic_symbols);
+ 	  dynamic_symbols = GET_ELF_SYMBOLS (filedata, &section, & num_dynamic_syms);
+ 	  if (num_dynamic_syms < 1)
+ 	    {
+@@ -11500,6 +11507,8 @@ process_symbol_table (Filedata * filedat
+ 	if (gnubuckets[i] != 0)
+ 	  {
+ 	    if (gnubuckets[i] < gnusymidx)
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 
+ 	    if (maxchain == 0xffffffff || gnubuckets[i] > maxchain)
+@@ -12950,6 +12959,8 @@ apply_relocations (Filedata *
+       symsec = filedata->section_headers + relsec->sh_link;
+       if (symsec->sh_type != SHT_SYMTAB
+ 	  && symsec->sh_type != SHT_DYNSYM)
++	/* There is a potential resource leak here, but it is not important.  */
++	/* coverity[leaked_storage: FALSE] */
+ 	return FALSE;
+       symtab = GET_ELF_SYMBOLS (filedata, symsec, & num_syms);
+ 
+@@ -16096,6 +16107,8 @@ process_mips_specific (Filedata * fileda
+ 	}
+       else
+ 	res = FALSE;
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+     }
+ 
+   if (conflicts_offset != 0 && conflictsno != 0)
+@@ -16133,6 +16146,8 @@ process_mips_specific (Filedata * fileda
+               get_data (NULL, filedata, conflicts_offset, conflictsno,
+                         sizeof (* econf32), _("conflict"));
+ 	  if (!econf32)
++	    /* There is a potential resource leak here, but it is not important.  */
++	    /* coverity[leaked_storage: FALSE] */
+ 	    return FALSE;
+ 
+ 	  for (cnt = 0; cnt < conflictsno; ++cnt)
+@@ -16148,6 +16163,8 @@ process_mips_specific (Filedata * fileda
+               get_data (NULL, filedata, conflicts_offset, conflictsno,
+                         sizeof (* econf64), _("conflict"));
+ 	  if (!econf64)
++	    /* There is a potential resource leak here, but it is not important.  */
++	    /* coverity[leaked_storage: FALSE] */
+ 	    return FALSE;
+ 
+ 	  for (cnt = 0; cnt < conflictsno; ++cnt)
+@@ -16350,6 +16367,8 @@ process_mips_specific (Filedata * fileda
+       data = (unsigned char *) get_data (NULL, filedata, offset, end - mips_pltgot,
+                                          1, _("Procedure Linkage Table data"));
+       if (data == NULL)
++	/* There is a potential resource leak here, but it is not important.  */
++	/* coverity[leaked_storage: FALSE] */
+ 	return FALSE;
+ 
+       printf ("\nPLT GOT:\n\n");
+@@ -16434,6 +16453,8 @@ process_nds32_specific (Filedata * filed
+ 	  printf ("(VEC_SIZE):\treserved\n");
+ 	  break;
+ 	}
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+     }
+ 
+   return TRUE;
+@@ -17488,9 +17509,9 @@ get_symbol_for_build_attribute (Filedata
+ 				const char **    pname)
+ {
+   static Filedata *         saved_filedata = NULL;
+-  static char *             strtab;
++  static char *             strtab = NULL;
+   static unsigned long      strtablen;
+-  static Elf_Internal_Sym * symtab;
++  static Elf_Internal_Sym * symtab = NULL;
+   static unsigned long      nsyms;
+   Elf_Internal_Sym *        saved_sym = NULL;
+   Elf_Internal_Sym *        sym;
+@@ -17507,12 +17528,14 @@ get_symbol_for_build_attribute (Filedata
+ 	{
+ 	  if (symsec->sh_type == SHT_SYMTAB)
+ 	    {
++	      free (symtab);
+ 	      symtab = GET_ELF_SYMBOLS (filedata, symsec, & nsyms);
+ 
+ 	      if (symsec->sh_link < filedata->file_header.e_shnum)
+ 		{
+ 		  Elf_Internal_Shdr * strtab_sec = filedata->section_headers + symsec->sh_link;
+ 
++		  free (strtab);
+ 		  strtab = (char *) get_data (NULL, filedata, strtab_sec->sh_offset,
+ 					      1, strtab_sec->sh_size,
+ 					      _("string table"));
+@@ -18095,6 +18118,8 @@ process_notes_at (Filedata *           f
+     {
+       warn (_("Corrupt note: alignment %ld, expecting 4 or 8\n"),
+ 	    (long) align);
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return FALSE;
+     }
+ 
+diff -rup binutils.orig/binutils/ieee.c binutils-2.30/binutils/ieee.c
+--- binutils.orig/binutils/ieee.c	2019-10-08 11:33:02.620958088 +0100
++++ binutils-2.30/binutils/ieee.c	2019-10-08 11:34:44.609294479 +0100
+@@ -2838,6 +2838,8 @@ ieee_read_cxx_class (struct ieee_info *i
+ 		if (structfields == NULL)
+ 		  {
+ 		    ieee_error (info, start, _("C++ object has no fields"));
++		    /* There is a potential resource leak here, but it is not important.  */
++		    /* coverity[leaked_storage: FALSE] */
+ 		    return FALSE;
+ 		  }
+ 
+diff -rup binutils.orig/binutils/rddbg.c binutils-2.30/binutils/rddbg.c
+--- binutils.orig/binutils/rddbg.c	2019-10-08 11:33:02.619958094 +0100
++++ binutils-2.30/binutils/rddbg.c	2019-10-08 11:34:35.169355901 +0100
+@@ -86,6 +86,8 @@ read_debugging_info (bfd *abfd, asymbol
+       if (! no_messages)
+ 	non_fatal (_("%s: no recognized debugging information"),
+ 		   bfd_get_filename (abfd));
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return NULL;
+     }
+ 
+@@ -300,6 +302,8 @@ read_symbol_stabs_debugging_info (bfd *a
+ 
+ 	  s = i.name;
+ 	  if (s == NULL || strlen (s) < 1)
++	    /* There is a potential resource leak here, but it is not important.  */
++	    /* coverity[leaked_storage: FALSE] */
+ 	    return FALSE;
+ 	  f = NULL;
+ 
+diff -rup binutils.orig/binutils/stabs.c binutils-2.30/binutils/stabs.c
+--- binutils.orig/binutils/stabs.c	2019-10-08 11:33:02.607958173 +0100
++++ binutils-2.30/binutils/stabs.c	2019-10-08 11:34:25.489418884 +0100
+@@ -758,6 +758,8 @@ parse_stab_string (void *dhandle, struct
+       if (*p != '=')
+ 	{
+ 	  bad_stab (string);
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 	}
+       ++p;
+@@ -791,6 +793,8 @@ parse_stab_string (void *dhandle, struct
+ 	  if (*p != ',')
+ 	    {
+ 	      bad_stab (string);
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 	    }
+ 	  if (! debug_record_typed_const (dhandle, name, dtype, atoi (p)))
+@@ -798,6 +802,8 @@ parse_stab_string (void *dhandle, struct
+ 	  break;
+ 	default:
+ 	  bad_stab (string);
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return FALSE;
+ 	}
+ 
+@@ -810,6 +816,8 @@ parse_stab_string (void *dhandle, struct
+       if (dtype == DEBUG_TYPE_NULL)
+ 	return FALSE;
+       if (! debug_record_label (dhandle, name, dtype, value))
++	/* There is a potential resource leak here, but it is not important.  */
++	/* coverity[leaked_storage: FALSE] */
+ 	return FALSE;
+       break;
+ 
+@@ -1114,6 +1122,8 @@ parse_stab_string (void *dhandle, struct
+ 	  while (*p != ';')
+ 	    ++p;
+ 	  ++p;
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return TRUE;
+ 	}
+       /* TODO SUNPro C++ support:
+@@ -1127,12 +1137,16 @@ parse_stab_string (void *dhandle, struct
+ 
+     default:
+       bad_stab (string);
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return FALSE;
+     }
+ 
+   /* FIXME: gdb converts structure values to structure pointers in a
+      couple of cases, depending upon the target.  */
+ 
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+   return TRUE;
+ }
+ 
+@@ -1499,6 +1513,8 @@ parse_stab_type (void *dhandle, struct s
+ 	      if (**pp != ',')
+ 		{
+ 		  bad_stab (orig);
++		  /* There is a potential resource leak here, but it is not important.  */
++		  /* coverity[leaked_storage: FALSE] */
+ 		  return DEBUG_TYPE_NULL;
+ 		}
+ 	      ++*pp;
+@@ -1513,6 +1529,8 @@ parse_stab_type (void *dhandle, struct s
+ 	      args[n] = parse_stab_type (dhandle, info, (const char *) NULL,
+ 					 pp, (debug_type **) NULL);
+ 	      if (args[n] == DEBUG_TYPE_NULL)
++		/* There is a potential resource leak here, but it is not important.  */
++		/* coverity[leaked_storage: FALSE] */
+ 		return DEBUG_TYPE_NULL;
+ 	      ++n;
+ 	    }
+@@ -2290,6 +2308,8 @@ parse_stab_struct_fields (void *dhandle,
+ 
+       if (! parse_stab_one_struct_field (dhandle, info, pp, p, fields + c,
+ 					 staticsp))
++	/* There is a potential resource leak here, but it is not important.  */
++	/* coverity[leaked_storage: FALSE] */
+ 	return FALSE;
+ 
+       ++c;
+@@ -2365,6 +2385,8 @@ parse_stab_cpp_abbrev (void *dhandle, st
+   if (**pp != ':')
+     {
+       bad_stab (orig);
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return FALSE;
+     }
+   ++*pp;
+@@ -2374,6 +2396,8 @@ parse_stab_cpp_abbrev (void *dhandle, st
+   if (**pp != ',')
+     {
+       bad_stab (orig);
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return FALSE;
+     }
+   ++*pp;
+@@ -2382,6 +2406,8 @@ parse_stab_cpp_abbrev (void *dhandle, st
+   if (**pp != ';')
+     {
+       bad_stab (orig);
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return FALSE;
+     }
+   ++*pp;
+@@ -2787,6 +2813,8 @@ parse_stab_members (void *dhandle, struc
+ 	      if (return_type == DEBUG_TYPE_NULL)
+ 		{
+ 		  bad_stab (orig);
++		  /* There is a potential resource leak here, but it is not important.  */
++		  /* coverity[leaked_storage: FALSE] */
+ 		  goto fail;
+ 		}
+ 	      type = parse_stab_argtypes (dhandle, info, class_type, name,
+@@ -3104,6 +3132,8 @@ parse_stab_array_type (void *dhandle, st
+   if (**pp != ';')
+     {
+       bad_stab (orig);
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return DEBUG_TYPE_NULL;
+     }
+   ++*pp;
+@@ -3120,6 +3150,8 @@ parse_stab_array_type (void *dhandle, st
+   if (**pp != ';')
+     {
+       bad_stab (orig);
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return DEBUG_TYPE_NULL;
+     }
+   ++*pp;
+@@ -3134,6 +3166,8 @@ parse_stab_array_type (void *dhandle, st
+   if (**pp != ';')
+     {
+       bad_stab (orig);
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return DEBUG_TYPE_NULL;
+     }
+   ++*pp;
+@@ -3141,6 +3175,8 @@ parse_stab_array_type (void *dhandle, st
+   element_type = parse_stab_type (dhandle, info, (const char *) NULL, pp,
+ 				  (debug_type **) NULL);
+   if (element_type == DEBUG_TYPE_NULL)
++    /* There is a potential resource leak here, but it is not important.  */
++    /* coverity[leaked_storage: FALSE] */
+     return DEBUG_TYPE_NULL;
+ 
+   if (adjustable)
+@@ -5366,6 +5402,8 @@ stab_demangle_v3_arg (void *dhandle, str
+ 					  dc->u.s_binary.right,
+ 					  &varargs);
+ 	if (pargs == NULL)
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return NULL;
+ 
+ 	return debug_make_function_type (dhandle, dt, pargs, varargs);
+diff -rup binutils.orig/gas/as.c binutils-2.30/gas/as.c
+--- binutils.orig/gas/as.c	2019-10-08 11:33:02.834956696 +0100
++++ binutils-2.30/gas/as.c	2019-10-08 11:34:17.073473644 +0100
+@@ -934,6 +934,8 @@ This program has absolutely no warranty.
+  	case OPTION_AL:
+ 	  listing |= LISTING_LISTING;
+ 	  if (optarg)
++	    /* There is a potential resource leak here, but it is not important.  */
++	    /* coverity[leaked_storage: FALSE] */
+ 	    listing_filename = xstrdup (optarg);
+ 	  break;
+ 
+@@ -988,6 +990,8 @@ This program has absolutely no warranty.
+ 		      listing |= LISTING_SYMBOLS;
+ 		      break;
+ 		    case '=':
++		      /* There is a potential resource leak here, but it is not important.  */
++		      /* coverity[leaked_storage: FALSE] */
+ 		      listing_filename = xstrdup (optarg + 1);
+ 		      optarg += strlen (listing_filename);
+ 		      break;
+@@ -1021,6 +1025,8 @@ This program has absolutely no warranty.
+ 	  }
+ 
+ 	case 'o':
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  out_file_name = xstrdup (optarg);
+ 	  break;
+ 
+diff -rup binutils.orig/gas/config/obj-elf.c binutils-2.30/gas/config/obj-elf.c
+--- binutils.orig/gas/config/obj-elf.c	2019-10-08 11:33:02.848956604 +0100
++++ binutils-2.30/gas/config/obj-elf.c	2019-10-08 11:34:09.473523094 +0100
+@@ -1028,6 +1028,8 @@ obj_elf_attach_to_group (int dummy ATTRI
+ 
+   elf_group_name (now_seg) = xstrdup (gname);
+   elf_section_flags (now_seg) |= SHF_GROUP;
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+ }
+ 
+ void
+@@ -1103,6 +1105,8 @@ obj_elf_section (int push)
+ 	  if (beg == NULL)
+ 	    {
+ 	      ignore_rest_of_line ();
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return;
+ 	    }
+ 	  attr |= obj_elf_parse_section_letters (beg, strlen (beg), &is_clone);
+@@ -1233,6 +1237,8 @@ obj_elf_section (int push)
+ 		{
+ 		  as_bad (_("character following name is not '#'"));
+ 		  ignore_rest_of_line ();
++		  /* There is a potential resource leak here, but it is not important.  */
++		  /* coverity[leaked_storage: FALSE] */
+ 		  return;
+ 		}
+ 	      ++input_line_pointer;
+diff -rup binutils.orig/gas/dwarf2dbg.c binutils-2.30/gas/dwarf2dbg.c
+--- binutils.orig/gas/dwarf2dbg.c	2019-10-08 11:33:02.839956663 +0100
++++ binutils-2.30/gas/dwarf2dbg.c	2019-10-08 11:34:00.913578791 +0100
+@@ -1701,6 +1701,8 @@ out_file_list (void)
+ 
+   /* Terminate filename list.  */
+   out_byte (0);
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+ }
+ 
+ /* Switch to SEC and output a header length field.  Return the size of
+@@ -2115,6 +2117,8 @@ out_debug_str (segT str_seg, symbolS **n
+   len = strlen (producer) + 1;
+   p = frag_more (len);
+   memcpy (p, producer, len);
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+ }
+ 
+ void
+diff -rup binutils.orig/gas/read.c binutils-2.30/gas/read.c
+--- binutils.orig/gas/read.c	2019-10-08 11:33:02.852956578 +0100
++++ binutils-2.30/gas/read.c	2019-10-08 11:33:51.537639797 +0100
+@@ -1714,6 +1714,8 @@ read_symbol_name (void)
+     {
+       as_bad (_("expected symbol name"));
+       ignore_rest_of_line ();
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return NULL;
+     }
+ 
+diff -rup binutils.orig/gas/write.c binutils-2.30/gas/write.c
+--- binutils.orig/gas/write.c	2019-10-08 11:33:02.833956702 +0100
++++ binutils-2.30/gas/write.c	2019-10-08 11:33:36.033740679 +0100
+@@ -1366,6 +1366,8 @@ write_relocs (bfd *abfd, asection *sec,
+       }
+   }
+ #endif
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+ }
+ 
+ static int
+@@ -1868,6 +1870,8 @@ create_note_reloc (segT           sec,
+   if (reloc->u.b.r.howto == NULL)
+     {
+       as_bad (_("unable to create reloc for build note"));
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return;
+     }
+ 
+diff -rup binutils.orig/gas/as.c binutils-2.30/gas/as.c
+--- binutils.orig/gas/as.c	2019-10-08 13:45:17.382428420 +0100
++++ binutils-2.30/gas/as.c	2019-10-08 13:46:01.613135558 +0100
+@@ -935,7 +935,7 @@ This program has absolutely no warranty.
+ 	  listing |= LISTING_LISTING;
+ 	  if (optarg)
+ 	    /* There is a potential resource leak here, but it is not important.  */
+-	    /* coverity[leaked_storage: FALSE] */
++	    /* coverity[overwrite_var: FALSE] */
+ 	    listing_filename = xstrdup (optarg);
+ 	  break;
+ 
+@@ -991,7 +991,7 @@ This program has absolutely no warranty.
+ 		      break;
+ 		    case '=':
+ 		      /* There is a potential resource leak here, but it is not important.  */
+-		      /* coverity[leaked_storage: FALSE] */
++		      /* coverity[overwrite_var: FALSE] */
+ 		      listing_filename = xstrdup (optarg + 1);
+ 		      optarg += strlen (listing_filename);
+ 		      break;
+@@ -1026,7 +1026,7 @@ This program has absolutely no warranty.
+ 
+ 	case 'o':
+ 	  /* There is a potential resource leak here, but it is not important.  */
+-	  /* coverity[leaked_storage: FALSE] */
++	  /* coverity[overwrite_var: FALSE] */
+ 	  out_file_name = xstrdup (optarg);
+ 	  break;
+ 
+diff -rup binutils.orig/gas/config/obj-elf.c binutils-2.30/gas/config/obj-elf.c
+--- binutils.orig/gas/config/obj-elf.c	2019-10-08 13:45:17.371428492 +0100
++++ binutils-2.30/gas/config/obj-elf.c	2019-10-08 13:46:49.916815725 +0100
+@@ -1023,6 +1023,8 @@ obj_elf_attach_to_group (int dummy ATTRI
+   if (elf_group_name (now_seg))
+     {
+       as_warn ("already has a group");
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return;
+     }
+ 
+diff -rup binutils.orig/gas/dwarf2dbg.c binutils-2.30/gas/dwarf2dbg.c
+--- binutils.orig/gas/dwarf2dbg.c	2019-10-08 13:45:17.384428407 +0100
++++ binutils-2.30/gas/dwarf2dbg.c	2019-10-08 13:47:29.198555634 +0100
+@@ -1664,6 +1664,8 @@ out_file_list (void)
+   /* Emit directory list.  */
+   for (i = 1; i < dirs_in_use; ++i)
+     {
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[overwrite_var: FALSE] */
+       dir = remap_debug_filename (dirs[i]);
+       size = strlen (dir) + 1;
+       cp = frag_more (size);
+diff -rup binutils.orig/gold/cref.cc binutils-2.30/gold/cref.cc
+--- binutils.orig/gold/cref.cc	2019-10-08 13:45:17.653426626 +0100
++++ binutils-2.30/gold/cref.cc	2019-10-08 13:47:46.669439951 +0100
+@@ -391,6 +391,8 @@ Cref::print_symbol_counts(const Symbol_t
+ 	}
+       if (f != NULL)
+ 	this->inputs_->print_symbol_counts(symtab, f);
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+     }
+ }
+ 
+diff -rup binutils.orig/gold/dwarf_reader.cc binutils-2.30/gold/dwarf_reader.cc
+--- binutils.orig/gold/dwarf_reader.cc	2019-10-08 13:45:17.654426619 +0100
++++ binutils-2.30/gold/dwarf_reader.cc	2019-10-08 13:48:03.292329889 +0100
+@@ -265,12 +265,16 @@ Dwarf_abbrev_table::do_get_abbrev(unsign
+ 	{
+ 	  // Read the attribute.
+ 	  if (this->buffer_pos_ >= this->buffer_end_)
++	    /* There is a potential resource leak here, but it is not important.  */
++	    /* coverity[leaked_storage: FALSE] */
+ 	    return NULL;
+ 	  uint64_t attr = read_unsigned_LEB_128(this->buffer_pos_, &len);
+ 	  this->buffer_pos_ += len;
+ 
+ 	  // Read the form.
+ 	  if (this->buffer_pos_ >= this->buffer_end_)
++	    /* There is a potential resource leak here, but it is not important.  */
++	    /* coverity[leaked_storage: FALSE] */
+ 	    return NULL;
+ 	  uint64_t form = read_unsigned_LEB_128(this->buffer_pos_, &len);
+ 	  this->buffer_pos_ += len;
+diff -rup binutils.orig/gold/dwp.cc binutils-2.30/gold/dwp.cc
+--- binutils.orig/gold/dwp.cc	2019-10-08 13:45:17.656426606 +0100
++++ binutils-2.30/gold/dwp.cc	2019-10-08 13:48:12.317270132 +0100
+@@ -803,6 +803,8 @@ Sized_relobj_dwo<size, big_endian>::setu
+ 	  pshdrs, this->shnum(), names, section_names_size, this, true);
+   if (compressed_sections != NULL && !compressed_sections->empty())
+     this->set_compressed_sections(compressed_sections);
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+ }
+ 
+ // Return a view of the contents of a section.
+@@ -1163,6 +1165,8 @@ Dwo_file::sized_read_unit_index(unsigned
+       elfcpp::Swap_unaligned<32, big_endian>::readval(contents
+ 						      + 2 * sizeof(uint32_t));
+   if (ncols == 0 || nused == 0)
++    /* There is a potential resource leak here, but it is not important.  */
++    /* coverity[leaked_storage: FALSE] */
+     return;
+ 
+   gold_assert(info_shndx > 0);
+@@ -1305,6 +1309,8 @@ Dwo_file::sized_verify_dwo_list(unsigned
+       elfcpp::Swap_unaligned<32, big_endian>::readval(contents
+ 						      + 2 * sizeof(uint32_t));
+   if (ncols == 0 || nused == 0)
++    /* There is a potential resource leak here, but it is not important.  */
++    /* coverity[leaked_storage: FALSE] */
+     return true;
+ 
+   unsigned int nslots =
+diff -rup binutils.orig/gold/ehframe.cc binutils-2.30/gold/ehframe.cc
+--- binutils.orig/gold/ehframe.cc	2019-10-08 13:45:17.653426626 +0100
++++ binutils-2.30/gold/ehframe.cc	2019-10-08 13:48:21.580208800 +0100
+@@ -1187,6 +1187,8 @@ Eh_frame::remove_ehframe_for_plt(Output_
+ 
+   if (this->mappings_are_done_)
+     this->final_data_size_ -= align_address(fde_length + 8, this->addralign());
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+ }
+ 
+ // Return the number of FDEs.
+diff -rup binutils.orig/gold/fileread.cc binutils-2.30/gold/fileread.cc
+--- binutils.orig/gold/fileread.cc	2019-10-08 13:45:17.657426599 +0100
++++ binutils-2.30/gold/fileread.cc	2019-10-08 13:48:33.645128913 +0100
+@@ -873,6 +873,8 @@ File_view::~File_view()
+ Input_file::Input_file(const char* name)
+   : found_name_(), file_(), is_in_sysroot_(false), format_(FORMAT_NONE)
+ {
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[ctor_dtor_leak: FALSE] */
+   this->input_argument_ =
+     new Input_file_argument(name, Input_file_argument::INPUT_FILE_TYPE_FILE,
+ 			    "", false, Position_dependent_options());
+@@ -884,6 +886,8 @@ Input_file::Input_file(const Task* task,
+ 		       const unsigned char* contents, off_t size)
+   : file_()
+ {
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[ctor_dtor_leak: FALSE] */
+   this->input_argument_ =
+     new Input_file_argument(name, Input_file_argument::INPUT_FILE_TYPE_FILE,
+ 			    "", false, Position_dependent_options());
+diff -rup binutils.orig/gold/gdb-index.cc binutils-2.30/gold/gdb-index.cc
+--- binutils.orig/gold/gdb-index.cc	2019-10-08 13:45:17.656426606 +0100
++++ binutils-2.30/gold/gdb-index.cc	2019-10-08 13:48:46.061046705 +0100
+@@ -1043,6 +1043,8 @@ Gdb_index::map_pubtable_to_dies(unsigned
+ 
+   map->clear();
+   if (!table->read_section(object, symbols, symbols_size))
++    /* There is a potential resource leak here, but it is not important.  */
++    /* coverity[leaked_storage: FALSE] */
+     return NULL;
+ 
+   while (table->read_header(section_offset))
+diff -rup binutils.orig/gold/gold.cc binutils-2.30/gold/gold.cc
+--- binutils.orig/gold/gold.cc	2019-10-08 13:45:17.656426606 +0100
++++ binutils-2.30/gold/gold.cc	2019-10-08 13:48:57.387971709 +0100
+@@ -349,6 +349,8 @@ process_incremental_input(Incremental_bi
+       // Incremental_binary::check_inputs should have cancelled the
+       // incremental update if the script has changed.
+       gold_assert(!ibase->file_has_changed(input_file_index));
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return new Check_script(layout, ibase, input_file_index, input_reader,
+ 			      this_blocker, next_blocker);
+     }
+@@ -362,6 +364,8 @@ process_incremental_input(Incremental_bi
+ 	{
+ 	  // Queue a task to check that no references have been added to any
+ 	  // of the library's unused symbols.
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return new Check_library(symtab, layout, ibase, input_file_index,
+ 				   input_reader, this_blocker, next_blocker);
+ 	}
+@@ -384,6 +388,8 @@ process_incremental_input(Incremental_bi
+ 	{
+ 	  if (ibase->file_has_changed(lib->input_file_index()))
+ 	    {
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return new Read_member(input_objects, symtab, layout, mapfile,
+ 				     input_reader, this_blocker, next_blocker);
+ 	    }
+diff -rup binutils.orig/gold/layout.cc binutils-2.30/gold/layout.cc
+--- binutils.orig/gold/layout.cc	2019-10-08 13:45:17.654426619 +0100
++++ binutils-2.30/gold/layout.cc	2019-10-08 13:49:09.579890984 +0100
+@@ -487,6 +487,8 @@ Layout::Layout(int number_of_input_files
+ 
+   // Initialize structure needed for an incremental build.
+   if (parameters->incremental())
++    /* There is a potential resource leak here, but it is not important.  */
++    /* coverity[ctor_dtor_leak: FALSE] */
+     this->incremental_inputs_ = new Incremental_inputs;
+ 
+   // The section name pool is worth optimizing in all cases, because
+@@ -3239,6 +3241,8 @@ Layout::create_note(const char* name, in
+ 						   flags, false, order, false,
+ 						   false, true);
+   if (os == NULL)
++    /* There is a potential resource leak here, but it is not important.  */
++    /* coverity[leaked_storage: FALSE] */
+     return NULL;
+ 
+   Output_section_data* posd = new Output_data_const_buffer(buffer, notehdrsz,
+@@ -3301,6 +3305,8 @@ Layout::create_gnu_properties_note()
+     }
+   Output_section_data* posd = new Output_data_const(desc, descsz, 4);
+   os->add_output_section_data(posd);
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+ }
+ 
+ // For an executable or shared library, create a note to record the
+@@ -4790,6 +4796,8 @@ Layout::create_dynamic_symtab(const Inpu
+ 
+ 	  if (odyn != NULL)
+ 	    odyn->add_section_address(elfcpp::DT_GNU_HASH, hashsec);
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	}
+     }
+ 
+@@ -4824,6 +4832,8 @@ Layout::create_dynamic_symtab(const Inpu
+ 
+       if (odyn != NULL)
+ 	odyn->add_section_address(elfcpp::DT_HASH, hashsec);
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+     }
+ }
+ 
+@@ -5030,6 +5040,8 @@ Layout::create_interp(const Target* targ
+ 						     false, false, false);
+   if (osec != NULL)
+     osec->add_output_section_data(odata);
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+ }
+ 
+ // Add dynamic tags for the PLT and the dynamic relocs.  This is
+diff -rup binutils.orig/gold/object.cc binutils-2.30/gold/object.cc
+--- binutils.orig/gold/object.cc	2019-10-08 13:45:17.669426519 +0100
++++ binutils-2.30/gold/object.cc	2019-10-08 13:49:36.027715869 +0100
+@@ -896,6 +896,8 @@ Sized_relobj_file<size, big_endian>::bas
+   if (strtab_shndx >= this->shnum())
+     {
+       this->error(_("invalid symbol table name index: %u"), strtab_shndx);
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return;
+     }
+   typename This::Shdr strtabshdr(pshdrs + strtab_shndx * This::shdr_size);
+@@ -903,6 +905,8 @@ Sized_relobj_file<size, big_endian>::bas
+     {
+       this->error(_("symbol table name section has wrong type: %u"),
+ 		  static_cast<unsigned int>(strtabshdr.get_sh_type()));
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return;
+     }
+ 
+diff -rup binutils.orig/gold/output.cc binutils-2.30/gold/output.cc
+--- binutils.orig/gold/output.cc	2019-10-08 13:45:17.655426612 +0100
++++ binutils-2.30/gold/output.cc	2019-10-08 13:49:48.571632811 +0100
+@@ -2392,6 +2392,8 @@ Output_section::Output_section(const cha
+     extra_segment_flags_(0),
+     segment_alignment_(0),
+     checkpoint_(NULL),
++    /* There is a potential resource leak here, but it is not important.  */
++    /* coverity[ctor_dtor_leak: FALSE] */
+     lookup_maps_(new Output_section_lookup_maps),
+     free_list_(),
+     free_space_fill_(NULL),
+diff -rup binutils.orig/gold/plugin.cc binutils-2.30/gold/plugin.cc
+--- binutils.orig/gold/plugin.cc	2019-10-08 13:45:17.669426519 +0100
++++ binutils-2.30/gold/plugin.cc	2019-10-08 13:49:58.427567551 +0100
+@@ -1919,6 +1919,8 @@ unique_segment_for_sections(const char*
+       Object* obj = parameters->options().plugins()->get_elf_object(
+           section_list[i].handle);
+       if (obj == NULL || obj->is_dynamic())
++	/* There is a potential resource leak here, but it is not important.  */
++	/* coverity[leaked_storage: FALSE] */
+ 	return LDPS_BAD_HANDLE;
+       unsigned int shndx = section_list[i].shndx;
+       Const_section_id secn_id(static_cast<Relobj*>(obj), shndx);
+diff -rup binutils.orig/gold/readsyms.cc binutils-2.30/gold/readsyms.cc
+--- binutils.orig/gold/readsyms.cc	2019-10-08 13:45:17.656426606 +0100
++++ binutils-2.30/gold/readsyms.cc	2019-10-08 13:50:09.964491164 +0100
+@@ -274,6 +274,8 @@ Read_symbols::do_read_symbols(Workqueue*
+ 
+   Input_file* input_file = new Input_file(&this->input_argument_->file());
+   if (!input_file->open(*this->dirpath_, this, &this->dirindex_))
++    /* There is a potential resource leak here, but it is not important.  */
++    /* coverity[leaked_storage: FALSE] */
+     return false;
+ 
+   // Read enough of the file to pick up the entire ELF header.
+diff -rup binutils.orig/gold/script.cc binutils-2.30/gold/script.cc
+--- binutils.orig/gold/script.cc	2019-10-08 13:45:17.652426632 +0100
++++ binutils-2.30/gold/script.cc	2019-10-08 13:50:19.708426645 +0100
+@@ -2844,6 +2844,8 @@ script_parse_option(void* closurev, cons
+       // The General_options class will quite possibly store a pointer
+       // into mutable_option, so we can't free it.  In cases the class
+       // does not store such a pointer, this is a memory leak.  Alas. :(
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+     }
+   closure->clear_skip_on_incompatible_target();
+ }
+diff -rup binutils.orig/gold/workqueue.cc binutils-2.30/gold/workqueue.cc
+--- binutils.orig/gold/workqueue.cc	2019-10-08 13:45:17.655426612 +0100
++++ binutils-2.30/gold/workqueue.cc	2019-10-08 13:50:28.076371238 +0100
+@@ -130,6 +130,8 @@ Workqueue::Workqueue(const General_optio
+   threads = false;
+ #endif
+   if (!threads)
++    /* There is a potential resource leak here, but it is not important.  */
++    /* coverity[ctor_dtor_leak: FALSE] */
+     this->threader_ = new Workqueue_threader_single(this);
+   else
+     {
+diff -rup binutils.orig/gprof/cg_print.c binutils-2.30/gprof/cg_print.c
+--- binutils.orig/gprof/cg_print.c	2019-10-08 13:45:17.127430108 +0100
++++ binutils-2.30/gprof/cg_print.c	2019-10-08 13:50:40.732287437 +0100
+@@ -1287,4 +1287,6 @@ cg_print_file_ordering (void)
+ 	printf ("%s\n", symbol_map[sym_index].file_name);
+       last = symbol_map[sym_index].file_name;
+     }
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+ }
+diff -rup binutils.orig/gold/gold.cc binutils-2.30/gold/gold.cc
+--- binutils.orig/gold/gold.cc	2019-10-08 14:45:28.076504486 +0100
++++ binutils-2.30/gold/gold.cc	2019-10-08 14:45:47.877373236 +0100
+@@ -221,6 +221,8 @@ queue_initial_tasks(const General_option
+ 	  else
+ 	    gold_fallback(_("restart link with --incremental-full"));
+ 	}
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+     }
+ 
+   // Read the input files.  We have to add the symbols to the symbol
+diff -rup binutils.orig/gprof/gmon_io.c binutils-2.30/gprof/gmon_io.c
+--- binutils.orig/gprof/gmon_io.c	2019-10-08 14:45:27.582507760 +0100
++++ binutils-2.30/gprof/gmon_io.c	2019-10-08 14:46:22.454144044 +0100
+@@ -749,4 +749,6 @@ gmon_out_write (const char *filename)
+ 	       whoami, file_format);
+       done (1);
+     }
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+ }
+diff -rup binutils.orig/gprof/source.c binutils-2.30/gprof/source.c
+--- binutils.orig/gprof/source.c	2019-10-08 14:45:27.583507753 +0100
++++ binutils-2.30/gprof/source.c	2019-10-08 14:46:33.925068010 +0100
+@@ -216,6 +216,8 @@ annotate_source (Source_File *sf, unsign
+       if (!ofp)
+ 	{
+ 	  perror (fname);
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return 0;
+ 	}
+     }
+diff -rup binutils.orig/ld/emultempl/elf32.em binutils-2.30/ld/emultempl/elf32.em
+--- binutils.orig/ld/emultempl/elf32.em	2019-10-08 14:45:27.638507389 +0100
++++ binutils-2.30/ld/emultempl/elf32.em	2019-10-08 14:47:40.916623958 +0100
+@@ -1776,6 +1776,9 @@ gld${EMULATION_NAME}_before_allocation (
+ 		if (cp != NULL && *cp != '\0')
+ 		  gld${EMULATION_NAME}_append_to_separated_string (&depaudit, cp);
+ 
++		/* There is a potential resource leak here, but it is not important.  */
++		/* coverity[overwrite_var: FALSE] */
++		/* coverity[leaked_storage: FALSE] */
+ 		cp = more ? ++cp2 : NULL;
+ 	      }
+ 	    while (cp != NULL);
+diff -rup binutils.orig/ld/emultempl/pe.em binutils-2.30/ld/emultempl/pe.em
+--- binutils.orig/ld/emultempl/pe.em	2019-10-08 14:45:27.637507396 +0100
++++ binutils-2.30/ld/emultempl/pe.em	2019-10-08 14:48:22.133350756 +0100
+@@ -1371,6 +1371,8 @@ write_build_id (bfd *abfd)
+     return 0;
+ 
+   if (bfd_bwrite (contents, size, abfd) != size)
++    /* There is a potential resource leak here, but it is not important.  */
++    /* coverity[leaked_storage: FALSE] */
+     return 0;
+ 
+   /* Construct the CodeView record.  */
+diff -rup binutils.orig/ld/emultempl/pep.em binutils-2.30/ld/emultempl/pep.em
+--- binutils.orig/ld/emultempl/pep.em	2019-10-08 14:45:27.638507389 +0100
++++ binutils-2.30/ld/emultempl/pep.em	2019-10-08 14:48:42.356216712 +0100
+@@ -1338,6 +1338,8 @@ write_build_id (bfd *abfd)
+     return 0;
+ 
+   if (bfd_bwrite (contents, size, abfd) != size)
++    /* There is a potential resource leak here, but it is not important.  */
++    /* coverity[leaked_storage: FALSE] */
+     return 0;
+ 
+   /* Construct the CodeView record.  */
+diff -rup binutils.orig/ld/ldfile.c binutils-2.30/ld/ldfile.c
+--- binutils.orig/ld/ldfile.c	2019-10-08 14:45:27.635507409 +0100
++++ binutils-2.30/ld/ldfile.c	2019-10-08 14:49:24.851935030 +0100
+@@ -563,6 +563,8 @@ ldfile_find_command_file (const char *na
+ 	  ldfile_add_library_path (script_dir, TRUE);
+ 	  search_tail_ptr = save_tail_ptr;
+ 	}
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+     }
+ 
+   /* Temporarily append script_search to the path list so that the
+diff -rup binutils.orig/ld/ldlang.c binutils-2.30/ld/ldlang.c
+--- binutils.orig/ld/ldlang.c	2019-10-08 14:45:27.638507389 +0100
++++ binutils-2.30/ld/ldlang.c	2019-10-08 14:49:37.283852627 +0100
+@@ -9272,6 +9272,8 @@ cmdline_fopen_temp (const char *path, co
+   fd = open (tmpname, O_RDWR | O_CREAT | O_EXCL, 0600);
+ #endif
+   if (fd == -1)
++    /* There is a potential resource leak here, but it is not important.  */
++    /* coverity[leaked_storage: FALSE] */
+     return NULL;
+   return bfd_fopen (tmpname, target, mode, fd);
+ }
+diff -rup binutils.orig/ld/ldmain.c binutils-2.30/ld/ldmain.c
+--- binutils.orig/ld/ldmain.c	2019-10-08 14:45:27.650507310 +0100
++++ binutils-2.30/ld/ldmain.c	2019-10-08 14:52:26.130733447 +0100
+@@ -802,6 +802,8 @@ add_archive_element (struct bfd_link_inf
+ 		info_msg ("%I: no new IR symbols to claimi\n",
+ 			  &orig_input);
+ 	      input->flags.claimed = 0;
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return FALSE;
+ 	    }
+ 	  input->flags.claim_archive = TRUE;
+@@ -855,6 +857,8 @@ add_archive_element (struct bfd_link_inf
+ 	  header_printed = TRUE;
+ 	}
+ 
++      /* Coverity incorrectly believes that abfd might be NULL at this point.  */
++      /* coverity[deref_after_free: FALSE] */
+       if (abfd->my_archive == NULL
+ 	  || bfd_is_thin_archive (abfd->my_archive))
+ 	{
+diff -rup binutils.orig/ld/ldwrite.c binutils-2.30/ld/ldwrite.c
+--- binutils.orig/ld/ldwrite.c	2019-10-08 14:45:27.635507409 +0100
++++ binutils-2.30/ld/ldwrite.c	2019-10-08 14:53:32.850291467 +0100
+@@ -367,6 +367,8 @@ clone_section (bfd *abfd, asection *s, c
+ 	{
+ 	  einfo (_ ("%F%P: cannot create split section name for %s\n"), name);
+ 	  /* Silence gcc warnings.  einfo exits, so we never reach here.  */
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return NULL;
+ 	}
+       tname[5] = 0;
+@@ -379,6 +381,8 @@ clone_section (bfd *abfd, asection *s, c
+     {
+       einfo (_("%F%P: clone section failed: %E\n"));
+       /* Silence gcc warnings.  einfo exits, so we never reach here.  */
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+       return NULL;
+     }
+   free (tname);
+diff -rup binutils.orig/ld/pe-dll.c binutils-2.30/ld/pe-dll.c
+--- binutils.orig/ld/pe-dll.c	2019-10-08 14:45:27.650507310 +0100
++++ binutils-2.30/ld/pe-dll.c	2019-10-08 14:54:58.385725320 +0100
+@@ -1397,6 +1397,8 @@ generate_reloc (bfd *abfd, struct bfd_li
+ 	  if (!bfd_generic_link_read_symbols (b))
+ 	    {
+ 	      einfo (_("%B%F: could not read symbols: %E\n"), b);
++	      /* There is a potential resource leak here, but it is not important.  */
++	      /* coverity[leaked_storage: FALSE] */
+ 	      return;
+ 	    }
+ 
+@@ -1585,6 +1587,8 @@ generate_reloc (bfd *abfd, struct bfd_li
+ 
+   while (reloc_sz < reloc_s->size)
+     reloc_d[reloc_sz++] = 0;
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+ }
+ 
+ /* Given the exiting def_file structure, print out a .DEF file that
+@@ -2043,6 +2047,8 @@ make_tail (bfd *parent)
+   bfd_set_section_contents (abfd, id7, d7, 0, len);
+ 
+   bfd_make_readable (abfd);
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+   return abfd;
+ }
+ 
+@@ -2323,6 +2329,8 @@ make_one (def_file_export *exp, bfd *par
+     bfd_set_section_contents (abfd, id6, d6, 0, len);
+ 
+   bfd_make_readable (abfd);
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+   return abfd;
+ }
+ 
+@@ -2364,6 +2372,8 @@ make_singleton_name_imp (const char *imp
+   bfd_set_section_contents (abfd, id5, d5, 0, PE_IDATA4_SIZE * 2);
+ 
+   bfd_make_readable (abfd);
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+   return abfd;
+ }
+ 
+@@ -2406,6 +2416,8 @@ make_singleton_name_thunk (const char *i
+   bfd_set_section_contents (abfd, id4, d4, 0, PE_IDATA4_SIZE * 2);
+ 
+   bfd_make_readable (abfd);
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+   return abfd;
+ }
+ 
+@@ -2491,6 +2503,8 @@ make_import_fixup_entry (const char *nam
+   bfd_set_section_contents (abfd, id2, d2, 0, 20);
+ 
+   bfd_make_readable (abfd);
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+   return abfd;
+ }
+ 
+diff -rup binutils.orig/ld/pe-dll.c binutils-2.30/ld/pe-dll.c
+--- binutils.orig/ld/pe-dll.c	2019-10-08 15:28:31.546363527 +0100
++++ binutils-2.30/ld/pe-dll.c	2019-10-08 15:28:46.677262539 +0100
+@@ -1977,6 +1977,8 @@ make_head (bfd *parent)
+     }
+ 
+   bfd_make_readable (abfd);
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+   return abfd;
+ }
+ 
+@@ -2590,6 +2592,8 @@ make_runtime_pseudo_reloc (const char *n
+       bfd_set_section_contents (abfd, rt_rel, rt_rel_d, 0, 8);
+    }
+   bfd_make_readable (abfd);
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+   return abfd;
+ }
+ 
+@@ -2634,6 +2638,8 @@ pe_create_runtime_relocator_reference (b
+   bfd_set_section_contents (abfd, extern_rt_rel, extern_rt_rel_d, 0, PE_IDATA5_SIZE);
+ 
+   bfd_make_readable (abfd);
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+   return abfd;
+ }
+ 
+diff -rup binutils.orig/ld/plugin.c binutils-2.30/ld/plugin.c
+--- binutils.orig/ld/plugin.c	2019-10-08 15:28:31.560363434 +0100
++++ binutils-2.30/ld/plugin.c	2019-10-08 15:29:32.579956181 +0100
+@@ -314,6 +314,8 @@ plugin_get_ir_dummy_bfd (const char *nam
+ 
+   bfd_use_reserved_id = 1;
+   bfd_plugin_target = bfd_plugin_target_p (srctemplate->xvec);
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+   abfd = bfd_create (concat (name, IRONLY_SUFFIX, (const char *) NULL),
+ 		     bfd_plugin_target ? link_info.output_bfd : srctemplate);
+   if (abfd != NULL)
+@@ -503,6 +505,8 @@ add_symbols (void *handle, int nsyms, co
+       symptrs[n] = bfdsym;
+       rv = asymbol_from_plugin_symbol (abfd, bfdsym, syms + n);
+       if (rv != LDPS_OK)
++	/* There is a potential resource leak here, but it is not important.  */
++	/* coverity[leaked_storage: FALSE] */
+ 	return rv;
+     }
+   bfd_set_symtab (abfd, symptrs, nsyms);
+@@ -842,6 +846,8 @@ static enum ld_plugin_status
+ set_extra_library_path (const char *path)
+ {
+   ASSERT (called_plugin);
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[leaked_storage: FALSE] */
+   ldfile_add_library_path (xstrdup (path), FALSE);
+   return LDPS_OK;
+ }
+diff -rup binutils.orig/ld/testplug2.c binutils-2.30/ld/testplug2.c
+--- binutils.orig/ld/testplug2.c	2019-10-08 15:28:31.547363520 +0100
++++ binutils-2.30/ld/testplug2.c	2019-10-08 15:31:08.483316106 +0100
+@@ -242,7 +242,7 @@ parse_symdefstr (const char *str, struct
+     sym->version = NULL;
+   if (colon5 && colon5[1])
+     {
+-      sym->comdat_key = malloc (strlen (colon5 + 1) + 1);
++      sym->comdat_key = malloc (strlen (colon5) + 1 + 1);
+       if (!sym->comdat_key)
+ 	return LDPS_ERR;
+       strcpy (sym->comdat_key, colon5 + 1);
+diff -rup binutils.orig/ld/testplug3.c binutils-2.30/ld/testplug3.c
+--- binutils.orig/ld/testplug3.c	2019-10-08 15:28:31.561363427 +0100
++++ binutils-2.30/ld/testplug3.c	2019-10-08 15:31:28.351183504 +0100
+@@ -241,7 +241,7 @@ parse_symdefstr (const char *str, struct
+     sym->version = NULL;
+   if (colon5 && colon5[1])
+     {
+-      sym->comdat_key = malloc (strlen (colon5 + 1) + 1);
++      sym->comdat_key = malloc (strlen (colon5) + 1 + 1);
+       if (!sym->comdat_key)
+ 	return LDPS_ERR;
+       strcpy (sym->comdat_key, colon5 + 1);
+diff -rup binutils.orig/ld/testplug4.c binutils-2.30/ld/testplug4.c
+--- binutils.orig/ld/testplug4.c	2019-10-08 15:28:31.547363520 +0100
++++ binutils-2.30/ld/testplug4.c	2019-10-08 15:31:38.739114175 +0100
+@@ -242,7 +242,7 @@ parse_symdefstr (const char *str, struct
+     sym->version = NULL;
+   if (colon5 && colon5[1])
+     {
+-      sym->comdat_key = malloc (strlen (colon5 + 1) + 1);
++      sym->comdat_key = malloc (strlen (colon5) + 1 + 1);
+       if (!sym->comdat_key)
+ 	return LDPS_ERR;
+       strcpy (sym->comdat_key, colon5 + 1);
+diff -rup binutils.orig/ld/testplug.c binutils-2.30/ld/testplug.c
+--- binutils.orig/ld/testplug.c	2019-10-08 15:28:31.560363434 +0100
++++ binutils-2.30/ld/testplug.c	2019-10-08 15:30:37.140525299 +0100
+@@ -263,7 +263,7 @@ parse_symdefstr (const char *str, struct
+     sym->version = NULL;
+   if (colon5 && colon5[1])
+     {
+-      sym->comdat_key = malloc (strlen (colon5 + 1) + 1);
++      sym->comdat_key = malloc (strlen (colon5) + 1 + 1);
+       if (!sym->comdat_key)
+ 	return LDPS_ERR;
+       strcpy (sym->comdat_key, colon5 + 1);
+@@ -564,6 +564,8 @@ onclaim_file (const struct ld_plugin_inp
+       if (buffer == NULL)
+         return LDPS_ERR;
+       if (read (file->fd, buffer, bytes_to_read_before_claim) < 0)
++	/* There is a potential resource leak here, but it is not important.  */
++	/* coverity[leaked_storage: FALSE] */
+         return LDPS_ERR;
+       free (buffer);
+     }
+diff -rup binutils.orig/libiberty/argv.c binutils-2.30/libiberty/argv.c
+--- binutils.orig/libiberty/argv.c	2019-10-08 15:28:32.008360444 +0100
++++ binutils-2.30/libiberty/argv.c	2019-10-08 15:32:06.258930502 +0100
+@@ -477,6 +477,8 @@ expandargv (int *argcp, char ***argvp)
+     error:
+       /* We're all done with the file now.  */
+       fclose (f);
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[leaked_storage: FALSE] */
+     }
+ }
+ 
+diff -rup binutils.orig/libiberty/regex.c binutils-2.30/libiberty/regex.c
+--- binutils.orig/libiberty/regex.c	2019-10-08 15:28:32.009360437 +0100
++++ binutils-2.30/libiberty/regex.c	2019-10-08 15:33:10.899499081 +0100
+@@ -2453,6 +2453,8 @@ PREFIX(regex_compile) (const char *ARG_P
+   /* Loop through the uncompiled pattern until we're at the end.  */
+   while (p != pend)
+     {
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[memleak: FALSE] */
+       PATFETCH (c);
+ 
+       switch (c)
+diff -rup binutils.orig/libiberty/simple-object-elf.c binutils-2.30/libiberty/simple-object-elf.c
+--- binutils.orig/libiberty/simple-object-elf.c	2019-10-08 15:28:32.011360423 +0100
++++ binutils-2.30/libiberty/simple-object-elf.c	2019-10-08 15:33:40.483301634 +0100
+@@ -1151,6 +1151,8 @@ simple_object_elf_copy_lto_debug_section
+ 	  *err = 0;
+ 	  XDELETEVEC (names);
+ 	  XDELETEVEC (shdrs);
++	  /* There is a potential resource leak here, but it is not important.  */
++	  /* coverity[leaked_storage: FALSE] */
+ 	  return "ELF section name out of range";
+ 	}
+ 
+diff -rup binutils.orig/libiberty/simple-object-mach-o.c binutils-2.30/libiberty/simple-object-mach-o.c
+--- binutils.orig/libiberty/simple-object-mach-o.c	2019-10-08 15:28:32.008360444 +0100
++++ binutils-2.30/libiberty/simple-object-mach-o.c	2019-10-08 15:34:16.530061049 +0100
+@@ -1139,6 +1139,8 @@ simple_object_mach_o_write_segment (simp
+ 	    write = sizeof zeroes;
+ 	  if (!simple_object_internal_write (descriptor, offset, zeroes, write,
+ 					     errmsg, err))
++	    /* There is a potential resource leak here, but it is not important.  */
++	    /* coverity[leaked_storage: FALSE] */
+ 	    return 0;
+ 	  offset += write;
+ 	}
+@@ -1245,6 +1247,8 @@ simple_object_mach_o_write_segment (simp
+       if (!simple_object_internal_write (descriptor, offset,
+ 					 (const unsigned char *) snames,
+ 					 name_offset, errmsg, err))
++	/* There is a potential resource leak here, but it is not important.  */
++	/* coverity[leaked_storage: FALSE] */
+ 	return 0;
+ 
+       sechdr_offset += sechdrsize;
+diff -rup binutils.orig/libiberty/vprintf-support.c binutils-2.30/libiberty/vprintf-support.c
+--- binutils.orig/libiberty/vprintf-support.c	2019-10-08 15:28:32.008360444 +0100
++++ binutils-2.30/libiberty/vprintf-support.c	2019-10-08 15:35:10.785698942 +0100
+@@ -49,6 +49,8 @@ libiberty_vprintf_buffer_size (const cha
+ #ifdef va_copy
+   va_copy (ap, args);
+ #else
++  /* There is a potential resource leak here, but it is not important.  */
++  /* coverity[va_list_usedBeforeStarted: FALSE] */
+   memcpy ((PTR) &ap, (PTR) &args, sizeof (va_list));
+ #endif
+ 
+diff -rup binutils.orig/libiberty/regex.c binutils-2.30/libiberty/regex.c
+--- binutils.orig/libiberty/regex.c	2019-10-08 16:19:10.299014643 +0100
++++ binutils-2.30/libiberty/regex.c	2019-10-08 16:20:19.168553441 +0100
+@@ -2454,7 +2454,7 @@ PREFIX(regex_compile) (const char *ARG_P
+   while (p != pend)
+     {
+       /* There is a potential resource leak here, but it is not important.  */
+-      /* coverity[memleak: FALSE] */
++      /* coverity[error[memleak]: FALSE] */
+       PATFETCH (c);
+ 
+       switch (c)
+diff -rup binutils.orig/libiberty/vprintf-support.c binutils-2.30/libiberty/vprintf-support.c
+--- binutils.orig/libiberty/vprintf-support.c	2019-10-08 16:19:10.299014643 +0100
++++ binutils-2.30/libiberty/vprintf-support.c	2019-10-08 16:24:37.917821604 +0100
+@@ -49,8 +49,8 @@ libiberty_vprintf_buffer_size (const cha
+ #ifdef va_copy
+   va_copy (ap, args);
+ #else
+-  /* There is a potential resource leak here, but it is not important.  */
+-  /* coverity[va_list_usedBeforeStarted: FALSE] */
++  /* Coverity insists on va_start being used.  */
++  va_start (ap);
+   memcpy ((PTR) &ap, (PTR) &args, sizeof (va_list));
+ #endif
+ 
+diff -rup binutils.orig/zlib/gzlib.c binutils-2.30/zlib/gzlib.c
+--- binutils.orig/zlib/gzlib.c	2019-10-08 16:19:10.304014609 +0100
++++ binutils-2.30/zlib/gzlib.c	2019-10-08 16:23:11.678398812 +0100
+@@ -291,7 +291,9 @@ gzFile ZEXPORT gzdopen(fd, mode)
+     gzFile gz;
+ 
+     if (fd == -1 || (path = (char *)malloc(7 + 3 * sizeof(int))) == NULL)
+-        return NULL;
++      /* There is a potential resource leak here, but it is not important.  */
++      /* coverity[Memory Leak: FALSE] */
++      return NULL;
+ #if !defined(NO_snprintf) && !defined(NO_vsnprintf)
+     (void)snprintf(path, 7 + 3 * sizeof(int), "<fd:%d>", fd);
+ #else
+diff -rup binutils.orig/libiberty/regex.c binutils-2.30/libiberty/regex.c
+--- binutils.orig/libiberty/regex.c	2019-10-08 17:18:32.431500412 +0100
++++ binutils-2.30/libiberty/regex.c	2019-10-08 17:26:31.013117409 +0100
+@@ -2453,8 +2453,13 @@ PREFIX(regex_compile) (const char *ARG_P
+   /* Loop through the uncompiled pattern until we're at the end.  */
+   while (p != pend)
+     {
+-      /* There is a potential resource leak here, but it is not important.  */
+-      /* coverity[error[memleak]: FALSE] */
++      if (p == pend)
++	{
++	  /* This free is to silence coverity.  */
++	  free (compile_stack.stack);
++	  compile_stack.stack = NULL;
++	  compile_stack.avail = 0;
++	}
+       PATFETCH (c);
+ 
+       switch (c)
+diff -rup binutils.orig/zlib/gzlib.c binutils-2.30/zlib/gzlib.c
+--- binutils.orig/zlib/gzlib.c	2019-10-08 17:18:32.435500384 +0100
++++ binutils-2.30/zlib/gzlib.c	2019-10-08 17:20:23.718713753 +0100
+@@ -287,13 +287,15 @@ gzFile ZEXPORT gzdopen(fd, mode)
+     int fd;
+     const char *mode;
+ {
+-    char *path;         /* identifier for error messages */
++    char *path = NULL;         /* identifier for error messages */
+     gzFile gz;
+ 
+     if (fd == -1 || (path = (char *)malloc(7 + 3 * sizeof(int))) == NULL)
+-      /* There is a potential resource leak here, but it is not important.  */
+-      /* coverity[Memory Leak: FALSE] */
+-      return NULL;
++      {
++	/* This free is to silence coverity.  */
++	free (path);
++	return NULL;
++      }
+ #if !defined(NO_snprintf) && !defined(NO_vsnprintf)
+     (void)snprintf(path, 7 + 3 * sizeof(int), "<fd:%d>", fd);
+ #else

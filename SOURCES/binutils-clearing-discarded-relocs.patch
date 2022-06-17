@@ -1,0 +1,306 @@
+diff -rup binutils.orig/bfd/cofflink.c binutils-2.30/bfd/cofflink.c
+--- binutils.orig/bfd/cofflink.c	2021-06-15 15:38:31.578170486 +0100
++++ binutils-2.30/bfd/cofflink.c	2021-06-15 15:59:12.394611963 +0100
+@@ -3084,8 +3084,8 @@ _bfd_coff_generic_relocate_section (bfd
+ 	 then zero this reloc field.  */
+       if (sec != NULL && discarded_section (sec))
+ 	{
+-	  _bfd_clear_contents (howto, input_bfd, input_section,
+-			       contents + (rel->r_vaddr - input_section->vma));
++	  (void) _bfd_clear_contents (howto, input_bfd, input_section,
++				      contents, (rel->r_vaddr - input_section->vma));
+ 	  continue;
+ 	}
+ 
+diff -rup binutils.orig/bfd/dwarf2.c binutils-2.30/bfd/dwarf2.c
+--- binutils.orig/bfd/dwarf2.c	2021-06-15 15:38:31.597170370 +0100
++++ binutils-2.30/bfd/dwarf2.c	2021-06-15 15:42:19.979779516 +0100
+@@ -2865,7 +2865,9 @@ find_abstract_instance_name (struct comp
+       info_ptr = unit->stash->info_ptr_memory;
+       info_ptr_end = unit->stash->info_ptr_end;
+       total = info_ptr_end - info_ptr;
+-      if (!die_ref || die_ref >= total)
++      if (!die_ref)
++	return TRUE;
++      if (die_ref >= total)
+ 	{
+ 	  _bfd_error_handler
+ 	    (_("Dwarf Error: Invalid abstract instance DIE ref."));
+diff -rup binutils.orig/bfd/elf-bfd.h binutils-2.30/bfd/elf-bfd.h
+--- binutils.orig/bfd/elf-bfd.h	2021-06-15 15:38:31.595170382 +0100
++++ binutils-2.30/bfd/elf-bfd.h	2021-06-15 15:58:55.365715715 +0100
+@@ -2829,8 +2829,8 @@ extern asection _bfd_elf_large_com_secti
+ 					howto, index, contents)		\
+   {									\
+     int i_;								\
+-    _bfd_clear_contents (howto, input_bfd, input_section,		\
+-			 contents + rel[index].r_offset);		\
++    (void) _bfd_clear_contents (howto, input_bfd, input_section,	\
++				contents, rel[index].r_offset);		\
+ 									\
+     if (bfd_link_relocatable (info)					\
+ 	&& (input_section->flags & SEC_DEBUGGING))			\
+diff -rup binutils.orig/bfd/elf32-arc.c binutils-2.30/bfd/elf32-arc.c
+--- binutils.orig/bfd/elf32-arc.c	2021-06-15 15:38:31.579170480 +0100
++++ binutils-2.30/bfd/elf32-arc.c	2021-06-15 15:58:28.869877138 +0100
+@@ -1532,8 +1532,8 @@ elf_arc_relocate_section (bfd *			  outp
+       /* Clean relocs for symbols in discarded sections.  */
+       if (sec != NULL && discarded_section (sec))
+ 	{
+-	  _bfd_clear_contents (howto, input_bfd, input_section,
+-			       contents + rel->r_offset);
++	  (void) _bfd_clear_contents (howto, input_bfd, input_section,
++				      contents, rel->r_offset);
+ 	  rel->r_offset = rel->r_offset;
+ 	  rel->r_info = 0;
+ 	  rel->r_addend = 0;
+diff -rup binutils.orig/bfd/elf32-i386.c binutils-2.30/bfd/elf32-i386.c
+--- binutils.orig/bfd/elf32-i386.c	2021-06-15 15:38:31.578170486 +0100
++++ binutils-2.30/bfd/elf32-i386.c	2021-06-15 15:58:12.694975692 +0100
+@@ -2165,8 +2165,8 @@ elf_i386_relocate_section (bfd *output_b
+ 
+       if (sec != NULL && discarded_section (sec))
+ 	{
+-	  _bfd_clear_contents (howto, input_bfd, input_section,
+-			       contents + rel->r_offset);
++	  (void) _bfd_clear_contents (howto, input_bfd, input_section,
++				      contents, rel->r_offset);
+ 	  wrel->r_offset = rel->r_offset;
+ 	  wrel->r_info = 0;
+ 	  wrel->r_addend = 0;
+diff -rup binutils.orig/bfd/elf32-metag.c binutils-2.30/bfd/elf32-metag.c
+--- binutils.orig/bfd/elf32-metag.c	2021-06-15 15:38:31.593170394 +0100
++++ binutils-2.30/bfd/elf32-metag.c	2021-06-15 15:57:48.039125909 +0100
+@@ -1392,8 +1392,8 @@ metag_final_link_relocate (reloc_howto_t
+ #define METAG_RELOC_AGAINST_DISCARDED_SECTION(info, input_bfd, input_section, \
+ 					      rel, relend, howto, contents) \
+   {									\
+-    _bfd_clear_contents (howto, input_bfd, input_section,		\
+-			 contents + rel->r_offset);			\
++    (void) _bfd_clear_contents (howto, input_bfd, input_section,		\
++				contents, rel->r_offset);		\
+ 									\
+     if (bfd_link_relocatable (info)					\
+ 	&& (input_section->flags & SEC_DEBUGGING))			\
+diff -rup binutils.orig/bfd/elf32-nds32.c binutils-2.30/bfd/elf32-nds32.c
+--- binutils.orig/bfd/elf32-nds32.c	2021-06-15 15:38:31.589170419 +0100
++++ binutils-2.30/bfd/elf32-nds32.c	2021-06-15 15:56:30.184600239 +0100
+@@ -12771,18 +12771,17 @@ nds32_elf_get_relocated_section_contents
+ 	  symbol = *(*parent)->sym_ptr_ptr;
+ 	  if (symbol->section && discarded_section (symbol->section))
+ 	    {
+-	      bfd_byte *p;
++	      bfd_vma off;
+ 	      static reloc_howto_type none_howto
+ 		= HOWTO (0, 0, 0, 0, FALSE, 0, complain_overflow_dont, NULL,
+ 			 "unused", FALSE, 0, 0, FALSE);
+ 
+-	      p = data + (*parent)->address * bfd_octets_per_byte (input_bfd);
+-	      _bfd_clear_contents ((*parent)->howto, input_bfd, input_section,
+-				   p);
+-	      (*parent)->sym_ptr_ptr = bfd_abs_section_ptr->symbol_ptr_ptr;
++	      off = (*parent)->address * bfd_octets_per_byte (input_bfd);
++	      r = _bfd_clear_contents ((*parent)->howto, input_bfd,
++				   input_section, data, off);
++ 	      (*parent)->sym_ptr_ptr = bfd_abs_section_ptr->symbol_ptr_ptr;
+ 	      (*parent)->addend = 0;
+ 	      (*parent)->howto = &none_howto;
+-	      r = bfd_reloc_ok;
+ 	    }
+ 	  else
+ 	    r = bfd_perform_relocation (input_bfd, *parent, data,
+diff -rup binutils.orig/bfd/elf32-ppc.c binutils-2.30/bfd/elf32-ppc.c
+--- binutils.orig/bfd/elf32-ppc.c	2021-06-15 15:38:31.597170370 +0100
++++ binutils-2.30/bfd/elf32-ppc.c	2021-06-15 15:56:39.367544293 +0100
+@@ -7778,8 +7778,8 @@ ppc_elf_relocate_section (bfd *output_bf
+ 	  if (r_type < R_PPC_max)
+ 	    howto = ppc_elf_howto_table[r_type];
+ 
+-	  _bfd_clear_contents (howto, input_bfd, input_section,
+-			       contents + rel->r_offset);
++	  (void) _bfd_clear_contents (howto, input_bfd, input_section,
++				      contents, rel->r_offset);
+ 	  wrel->r_offset = rel->r_offset;
+ 	  wrel->r_info = 0;
+ 	  wrel->r_addend = 0;
+diff -rup binutils.orig/bfd/elf32-visium.c binutils-2.30/bfd/elf32-visium.c
+--- binutils.orig/bfd/elf32-visium.c	2021-06-15 15:38:31.580170473 +0100
++++ binutils-2.30/bfd/elf32-visium.c	2021-06-15 15:57:29.271240254 +0100
+@@ -616,8 +616,8 @@ visium_elf_relocate_section (bfd *output
+ 	  /* For relocs against symbols from removed linkonce sections,
+ 	     or sections discarded by a linker script, we just want the
+ 	     section contents zeroed.  Avoid any special processing.  */
+-	  _bfd_clear_contents (howto, input_bfd, input_section,
+-			       contents + rel->r_offset);
++	  (void) _bfd_clear_contents (howto, input_bfd, input_section,
++				      contents, rel->r_offset);
+ 
+ 	  rel->r_info = 0;
+ 	  rel->r_addend = 0;
+diff -rup binutils.orig/bfd/elf64-ppc.c binutils-2.30/bfd/elf64-ppc.c
+--- binutils.orig/bfd/elf64-ppc.c	2021-06-15 15:38:31.578170486 +0100
++++ binutils-2.30/bfd/elf64-ppc.c	2021-06-15 15:57:01.529409265 +0100
+@@ -13526,9 +13526,9 @@ ppc64_elf_relocate_section (bfd *output_
+ 
+       if (sec != NULL && discarded_section (sec))
+ 	{
+-	  _bfd_clear_contents (ppc64_elf_howto_table[r_type],
+-			       input_bfd, input_section,
+-			       contents + rel->r_offset);
++	  (void) _bfd_clear_contents (ppc64_elf_howto_table[r_type],
++				      input_bfd, input_section,
++				      contents, rel->r_offset);
+ 	  wrel->r_offset = rel->r_offset;
+ 	  wrel->r_info = 0;
+ 	  wrel->r_addend = 0;
+diff -rup binutils.orig/bfd/elf64-x86-64.c binutils-2.30/bfd/elf64-x86-64.c
+--- binutils.orig/bfd/elf64-x86-64.c	2021-06-15 15:38:31.585170443 +0100
++++ binutils-2.30/bfd/elf64-x86-64.c	2021-06-15 15:57:09.831358693 +0100
+@@ -2457,8 +2457,8 @@ elf_x86_64_relocate_section (bfd *output
+ 
+       if (sec != NULL && discarded_section (sec))
+ 	{
+-	  _bfd_clear_contents (howto, input_bfd, input_section,
+-			       contents + rel->r_offset);
++	  (void) _bfd_clear_contents (howto, input_bfd, input_section,
++				      contents, rel->r_offset);
+ 	  wrel->r_offset = rel->r_offset;
+ 	  wrel->r_info = 0;
+ 	  wrel->r_addend = 0;
+diff -rup binutils.orig/bfd/libbfd-in.h binutils-2.30/bfd/libbfd-in.h
+--- binutils.orig/bfd/libbfd-in.h	2021-06-15 15:38:31.593170394 +0100
++++ binutils-2.30/bfd/libbfd-in.h	2021-06-15 15:54:10.856449129 +0100
+@@ -674,8 +674,9 @@ extern bfd_reloc_status_type _bfd_reloca
+   (reloc_howto_type *, bfd *, bfd_vma, bfd_byte *);
+ 
+ /* Clear a given location using a given howto.  */
+-extern void _bfd_clear_contents (reloc_howto_type *howto, bfd *input_bfd,
+-				 asection *input_section, bfd_byte *location);
++extern bfd_reloc_status_type _bfd_clear_contents
++  (reloc_howto_type *howto, bfd *input_bfd,
++   asection *input_section, bfd_byte *, bfd_vma);
+ 
+ /* Link stabs in sections in the first pass.  */
+ 
+diff -rup binutils.orig/bfd/libbfd.h binutils-2.30/bfd/libbfd.h
+--- binutils.orig/bfd/libbfd.h	2021-06-15 15:38:31.581170467 +0100
++++ binutils-2.30/bfd/libbfd.h	2021-06-15 15:53:55.863540475 +0100
+@@ -679,8 +679,9 @@ extern bfd_reloc_status_type _bfd_reloca
+   (reloc_howto_type *, bfd *, bfd_vma, bfd_byte *);
+ 
+ /* Clear a given location using a given howto.  */
+-extern void _bfd_clear_contents (reloc_howto_type *howto, bfd *input_bfd,
+-				 asection *input_section, bfd_byte *location);
++extern bfd_reloc_status_type _bfd_clear_contents
++  (reloc_howto_type *howto, bfd *input_bfd,
++   asection *input_section, bfd_byte *, bfd_vma);
+ 
+ /* Link stabs in sections in the first pass.  */
+ 
+diff -rup binutils.orig/bfd/reloc.c binutils-2.30/bfd/reloc.c
+--- binutils.orig/bfd/reloc.c	2021-06-15 15:38:31.593170394 +0100
++++ binutils-2.30/bfd/reloc.c	2021-06-15 15:51:59.449249747 +0100
+@@ -1604,23 +1604,29 @@ _bfd_relocate_contents (reloc_howto_type
+    relocations against discarded symbols, to make ignorable debug or unwind
+    information more obvious.  */
+ 
+-void
++bfd_reloc_status_type
+ _bfd_clear_contents (reloc_howto_type *howto,
+ 		     bfd *input_bfd,
+ 		     asection *input_section,
+-		     bfd_byte *location)
++		     bfd_byte *buf,
++		     bfd_vma off)
+ {
+   int size;
+   bfd_vma x = 0;
++  bfd_byte *location;
++
++  if (!bfd_reloc_offset_in_range (howto, input_bfd, input_section, off))
++    return bfd_reloc_outofrange;
+ 
+   /* Get the value we are going to relocate.  */
+-  size = bfd_get_reloc_size (howto);
++  location = buf + off;
++  size = bfd_get_reloc_size (howto); 
+   switch (size)
+     {
+     default:
+-      abort ();
++      return bfd_reloc_notsupported;
+     case 0:
+-      return;
++      return bfd_reloc_ok;
+     case 1:
+       x = bfd_get_8 (input_bfd, location);
+       break;
+@@ -1634,7 +1640,7 @@ _bfd_clear_contents (reloc_howto_type *h
+ #ifdef BFD64
+       x = bfd_get_64 (input_bfd, location);
+ #else
+-      abort ();
++      return bfd_reloc_notsupported;
+ #endif
+       break;
+     }
+@@ -1654,7 +1660,7 @@ _bfd_clear_contents (reloc_howto_type *h
+     {
+     default:
+     case 0:
+-      abort ();
++      return bfd_reloc_notsupported;
+     case 1:
+       bfd_put_8 (input_bfd, x, location);
+       break;
+@@ -1668,10 +1674,12 @@ _bfd_clear_contents (reloc_howto_type *h
+ #ifdef BFD64
+       bfd_put_64 (input_bfd, x, location);
+ #else
+-      abort ();
++      return bfd_reloc_notsupported;
+ #endif
+       break;
+     }
++
++  return bfd_reloc_ok;
+ }
+ 
+ /*
+@@ -8209,20 +8217,30 @@ bfd_generic_get_relocated_section_conten
+ 	      goto error_return;
+ 	    }
+ 
+-	  if (symbol->section && discarded_section (symbol->section))
++	  /* Zap reloc field when the symbol is from a discarded
++	     section, ignoring any addend.  Do the same when called
++	     from bfd_simple_get_relocated_section_contents for
++	     undefined symbols in debug sections.  This is to keep
++	     debug info reasonably sane, in particular so that
++	     DW_FORM_ref_addr to another file's .debug_info isn't
++	     confused with an offset into the current file's
++	     .debug_info.  */
++	  if ((symbol->section != NULL && discarded_section (symbol->section))
++	      || (symbol->section == bfd_und_section_ptr
++		  && (input_section->flags & SEC_DEBUGGING) != 0
++		  && link_info->input_bfds == link_info->output_bfd))
+ 	    {
+-	      bfd_byte *p;
++	      bfd_vma off;
+ 	      static reloc_howto_type none_howto
+ 		= HOWTO (0, 0, 0, 0, FALSE, 0, complain_overflow_dont, NULL,
+ 			 "unused", FALSE, 0, 0, FALSE);
+ 
+-	      p = data + (*parent)->address * bfd_octets_per_byte (input_bfd);
+-	      _bfd_clear_contents ((*parent)->howto, input_bfd, input_section,
+-				   p);
++	      off = (*parent)->address * bfd_octets_per_byte (input_bfd);
++	      r = _bfd_clear_contents ((*parent)->howto, input_bfd,
++				       input_section, data, off);
+ 	      (*parent)->sym_ptr_ptr = bfd_abs_section_ptr->symbol_ptr_ptr;
+ 	      (*parent)->addend = 0;
+ 	      (*parent)->howto = &none_howto;
+-	      r = bfd_reloc_ok;
+ 	    }
+ 	  else
+ 	    r = bfd_perform_relocation (input_bfd,

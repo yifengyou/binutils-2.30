@@ -1,0 +1,1239 @@
+Only in binutils-2.30/gold: ChangeLog.orig
+Only in binutils-2.30/gold: ChangeLog.rej
+diff -rup binutils.orig/gold/layout.cc binutils-2.30/gold/layout.cc
+--- binutils.orig/gold/layout.cc	2018-08-14 16:18:17.928466978 +0100
++++ binutils-2.30/gold/layout.cc	2018-08-14 16:23:15.811244776 +0100
+@@ -474,7 +474,8 @@ Layout::Layout(int number_of_input_files
+     input_section_position_(),
+     input_section_glob_(),
+     incremental_base_(NULL),
+-    free_list_()
++    free_list_(),
++    gnu_properties_()
+ {
+   // Make space for more than enough segments for a typical file.
+   // This is just for efficiency--it's OK if we wind up needing more.
+@@ -2182,11 +2183,243 @@ Layout::layout_gnu_stack(bool seen_gnu_s
+     }
+ }
+ 
++// Read a value with given size and endianness.
++
++static inline uint64_t
++read_sized_value(size_t size, const unsigned char* buf, bool is_big_endian,
++		 const Object* object)
++{
++  uint64_t val = 0;
++  if (size == 4)
++    {
++      if (is_big_endian)
++	val = elfcpp::Swap<32, true>::readval(buf);
++      else
++	val = elfcpp::Swap<32, false>::readval(buf);
++    }
++  else if (size == 8)
++    {
++      if (is_big_endian)
++	val = elfcpp::Swap<64, true>::readval(buf);
++      else
++	val = elfcpp::Swap<64, false>::readval(buf);
++    }
++  else
++    {
++      gold_warning(_("%s: in .note.gnu.property section, "
++		     "pr_datasz must be 4 or 8"),
++		   object->name().c_str());
++    }
++  return val;
++}
++
++// Write a value with given size and endianness.
++
++static inline void
++write_sized_value(uint64_t value, size_t size, unsigned char* buf,
++		  bool is_big_endian)
++{
++  if (size == 4)
++    {
++      if (is_big_endian)
++	elfcpp::Swap<32, true>::writeval(buf, static_cast<uint32_t>(value));
++      else
++	elfcpp::Swap<32, false>::writeval(buf, static_cast<uint32_t>(value));
++    }
++  else if (size == 8)
++    {
++      if (is_big_endian)
++	elfcpp::Swap<64, true>::writeval(buf, value);
++      else
++	elfcpp::Swap<64, false>::writeval(buf, value);
++    }
++  else
++    {
++      // We will have already complained about this.
++    }
++}
++
++// Handle the .note.gnu.property section at layout time.
++
++void
++Layout::layout_gnu_property(unsigned int note_type,
++			    unsigned int pr_type,
++			    size_t pr_datasz,
++			    const unsigned char* pr_data,
++			    const Object* object)
++{
++  // We currently support only the one note type.
++  gold_assert(note_type == elfcpp::NT_GNU_PROPERTY_TYPE_0);
++
++  if (pr_type >= elfcpp::GNU_PROPERTY_LOPROC
++      && pr_type < elfcpp::GNU_PROPERTY_HIPROC)
++    {
++      // Target-dependent property value; call the target to record.
++      const int size = parameters->target().get_size();
++      const bool is_big_endian = parameters->target().is_big_endian();
++      if (size == 32)
++        {
++          if (is_big_endian)
++            {
++#ifdef HAVE_TARGET_32_BIG
++	      parameters->sized_target<32, true>()->
++		  record_gnu_property(note_type, pr_type, pr_datasz, pr_data,
++				      object);
++#else
++	      gold_unreachable();
++#endif
++            }
++          else
++            {
++#ifdef HAVE_TARGET_32_LITTLE
++	      parameters->sized_target<32, false>()->
++		  record_gnu_property(note_type, pr_type, pr_datasz, pr_data,
++				      object);
++#else
++	      gold_unreachable();
++#endif
++            }
++        }
++      else if (size == 64)
++        {
++          if (is_big_endian)
++            {
++#ifdef HAVE_TARGET_64_BIG
++	      parameters->sized_target<64, true>()->
++		  record_gnu_property(note_type, pr_type, pr_datasz, pr_data,
++				      object);
++#else
++	      gold_unreachable();
++#endif
++            }
++          else
++            {
++#ifdef HAVE_TARGET_64_LITTLE
++	      parameters->sized_target<64, false>()->
++		  record_gnu_property(note_type, pr_type, pr_datasz, pr_data,
++				      object);
++#else
++	      gold_unreachable();
++#endif
++            }
++        }
++      else
++        gold_unreachable();
++      return;
++    }
++
++  Gnu_properties::iterator pprop = this->gnu_properties_.find(pr_type);
++  if (pprop == this->gnu_properties_.end())
++    {
++      Gnu_property prop;
++      prop.pr_datasz = pr_datasz;
++      prop.pr_data = new unsigned char[pr_datasz];
++      memcpy(prop.pr_data, pr_data, pr_datasz);
++      this->gnu_properties_[pr_type] = prop;
++    }
++  else
++    {
++      const bool is_big_endian = parameters->target().is_big_endian();
++      switch (pr_type)
++	{
++	case elfcpp::GNU_PROPERTY_STACK_SIZE:
++	  // Record the maximum value seen.
++	  {
++	    uint64_t val1 = read_sized_value(pprop->second.pr_datasz,
++					     pprop->second.pr_data,
++					     is_big_endian, object);
++	    uint64_t val2 = read_sized_value(pr_datasz, pr_data,
++					     is_big_endian, object);
++	    if (val2 > val1)
++	      write_sized_value(val2, pprop->second.pr_datasz,
++				pprop->second.pr_data, is_big_endian);
++	  }
++	  break;
++	case elfcpp::GNU_PROPERTY_NO_COPY_ON_PROTECTED:
++	  // No data to merge.
++	  break;
++	default:
++	  gold_warning(_("%s: unknown program property type %d "
++			 "in .note.gnu.property section"),
++		       object->name().c_str(), pr_type);
++	}
++    }
++}
++
++// Merge per-object properties with program properties.
++// This lets the target identify objects that are missing certain
++// properties, in cases where properties must be ANDed together.
++
++void
++Layout::merge_gnu_properties(const Object* object)
++{
++  const int size = parameters->target().get_size();
++  const bool is_big_endian = parameters->target().is_big_endian();
++  if (size == 32)
++    {
++      if (is_big_endian)
++	{
++#ifdef HAVE_TARGET_32_BIG
++	  parameters->sized_target<32, true>()->merge_gnu_properties(object);
++#else
++	  gold_unreachable();
++#endif
++	}
++      else
++	{
++#ifdef HAVE_TARGET_32_LITTLE
++	  parameters->sized_target<32, false>()->merge_gnu_properties(object);
++#else
++	  gold_unreachable();
++#endif
++	}
++    }
++  else if (size == 64)
++    {
++      if (is_big_endian)
++	{
++#ifdef HAVE_TARGET_64_BIG
++	  parameters->sized_target<64, true>()->merge_gnu_properties(object);
++#else
++	  gold_unreachable();
++#endif
++	}
++      else
++	{
++#ifdef HAVE_TARGET_64_LITTLE
++	  parameters->sized_target<64, false>()->merge_gnu_properties(object);
++#else
++	  gold_unreachable();
++#endif
++	}
++    }
++  else
++    gold_unreachable();
++}
++
++// Add a target-specific property for the output .note.gnu.property section.
++
++void
++Layout::add_gnu_property(unsigned int note_type,
++			 unsigned int pr_type,
++			 size_t pr_datasz,
++			 const unsigned char* pr_data)
++{
++  gold_assert(note_type == elfcpp::NT_GNU_PROPERTY_TYPE_0);
++
++  Gnu_property prop;
++  prop.pr_datasz = pr_datasz;
++  prop.pr_data = new unsigned char[pr_datasz];
++  memcpy(prop.pr_data, pr_data, pr_datasz);
++  this->gnu_properties_[pr_type] = prop;
++}
++
+ // Create automatic note sections.
+ 
+ void
+ Layout::create_notes()
+ {
++  this->create_gnu_properties_note();
+   this->create_gold_note();
+   this->create_stack_segment();
+   this->create_build_id();
+@@ -3010,6 +3243,58 @@ Layout::create_note(const char* name, in
+   return os;
+ }
+ 
++// Create a .note.gnu.property section to record program properties
++// accumulated from the input files.
++
++void
++Layout::create_gnu_properties_note()
++{
++  parameters->target().finalize_gnu_properties(this);
++
++  if (this->gnu_properties_.empty())
++    return;
++
++  const unsigned int size = parameters->target().get_size();
++  const bool is_big_endian = parameters->target().is_big_endian();
++
++  // Compute the total size of the properties array.
++  size_t descsz = 0;
++  for (Gnu_properties::const_iterator prop = this->gnu_properties_.begin();
++       prop != this->gnu_properties_.end();
++       ++prop)
++    {
++      descsz = align_address(descsz + 8 + prop->second.pr_datasz, size / 8);
++    }
++
++  // Create the note section.
++  size_t trailing_padding;
++  Output_section* os = this->create_note("GNU", elfcpp::NT_GNU_PROPERTY_TYPE_0,
++					 ".note.gnu.property", descsz,
++					 true, &trailing_padding);
++  if (os == NULL)
++    return;
++  gold_assert(trailing_padding == 0);
++
++  // Allocate and fill the properties array.
++  unsigned char* desc = new unsigned char[descsz];
++  unsigned char* p = desc;
++  for (Gnu_properties::const_iterator prop = this->gnu_properties_.begin();
++       prop != this->gnu_properties_.end();
++       ++prop)
++    {
++      size_t datasz = prop->second.pr_datasz;
++      size_t aligned_datasz = align_address(prop->second.pr_datasz, size / 8);
++      write_sized_value(prop->first, 4, p, is_big_endian);
++      write_sized_value(datasz, 4, p + 4, is_big_endian);
++      memcpy(p + 8, prop->second.pr_data, datasz);
++      if (aligned_datasz > datasz)
++        memset(p + 8 + datasz, 0, aligned_datasz - datasz);
++      p += 8 + aligned_datasz;
++    }
++  Output_section_data* posd = new Output_data_const(desc, descsz, 4);
++  os->add_output_section_data(posd);
++}
++
+ // For an executable or shared library, create a note to record the
+ // version of gold used to create the binary.
+ 
+Only in binutils-2.30/gold: layout.cc.orig
+diff -rup binutils.orig/gold/layout.h binutils-2.30/gold/layout.h
+--- binutils.orig/gold/layout.h	2018-08-14 16:18:17.926466993 +0100
++++ binutils-2.30/gold/layout.h	2018-08-14 16:23:15.811244776 +0100
+@@ -680,6 +680,25 @@ class Layout
+   layout_gnu_stack(bool seen_gnu_stack, uint64_t gnu_stack_flags,
+ 		   const Object*);
+ 
++  // Layout a .note.gnu.property section.
++  void
++  layout_gnu_property(unsigned int note_type,
++		      unsigned int pr_type,
++		      size_t pr_datasz,
++		      const unsigned char* pr_data,
++		      const Object* object);
++
++  // Merge per-object properties with program properties.
++  void
++  merge_gnu_properties(const Object* object);
++
++  // Add a target-specific property for the output .note.gnu.property section.
++  void
++  add_gnu_property(unsigned int note_type,
++		   unsigned int pr_type,
++		   size_t pr_datasz,
++		   const unsigned char* pr_data);
++
+   // Add an Output_section_data to the layout.  This is used for
+   // special sections like the GOT section.  ORDER is where the
+   // section should wind up in the output segment.  IS_RELRO is true
+@@ -1040,6 +1059,10 @@ class Layout
+   create_note(const char* name, int note_type, const char* section_name,
+ 	      size_t descsz, bool allocate, size_t* trailing_padding);
+ 
++  // Create a note section for gnu program properties.
++  void
++  create_gnu_properties_note();
++
+   // Create a note section for gold version.
+   void
+   create_gold_note();
+@@ -1326,6 +1349,14 @@ class Layout
+     std::vector<Section_info> section_infos_;
+   };
+ 
++  // Program properties from .note.gnu.property sections.
++  struct Gnu_property
++  {
++    size_t pr_datasz;
++    unsigned char* pr_data;
++  };
++  typedef std::map<unsigned int, Gnu_property> Gnu_properties;
++
+   // The number of input files, for sizing tables.
+   int number_of_input_files_;
+   // Information set by scripts or by command line options.
+@@ -1452,6 +1483,8 @@ class Layout
+   Incremental_binary* incremental_base_;
+   // For incremental links, a list of free space within the file.
+   Free_list free_list_;
++  // Program properties.
++  Gnu_properties gnu_properties_;
+ };
+ 
+ // This task handles writing out data in output sections which is not
+Only in binutils-2.30/gold: layout.h.orig
+diff -rup binutils.orig/gold/object.cc binutils-2.30/gold/object.cc
+--- binutils.orig/gold/object.cc	2018-08-14 16:18:17.929466971 +0100
++++ binutils-2.30/gold/object.cc	2018-08-14 16:23:15.812244769 +0100
+@@ -1313,6 +1313,102 @@ Sized_relobj_file<size, big_endian>::lay
+     this->set_relocs_must_follow_section_writes();
+ }
+ 
++// Layout an input .note.gnu.property section.
++
++// This note section has an *extremely* non-standard layout.
++// The gABI spec says that ELF-64 files should have 8-byte fields and
++// 8-byte alignment in the note section, but the Gnu tools generally
++// use 4-byte fields and 4-byte alignment (see the comment for
++// Layout::create_note).  This section uses 4-byte fields (i.e.,
++// namesz, descsz, and type are always 4 bytes), the name field is
++// padded to a multiple of 4 bytes, but the desc field is padded
++// to a multiple of 4 or 8 bytes, depending on the ELF class.
++// The individual properties within the desc field always use
++// 4-byte pr_type and pr_datasz fields, but pr_data is padded to
++// a multiple of 4 or 8 bytes, depending on the ELF class.
++
++template<int size, bool big_endian>
++void
++Sized_relobj_file<size, big_endian>::layout_gnu_property_section(
++    Layout* layout,
++    unsigned int shndx)
++{
++  section_size_type contents_len;
++  const unsigned char* pcontents = this->section_contents(shndx,
++							  &contents_len,
++							  false);
++  const unsigned char* pcontents_end = pcontents + contents_len;
++
++  // Loop over all the notes in this section.
++  while (pcontents < pcontents_end)
++    {
++      if (pcontents + 16 > pcontents_end)
++	{
++	  gold_warning(_("%s: corrupt .note.gnu.property section "
++			 "(note too short)"),
++		       this->name().c_str());
++	  return;
++	}
++
++      size_t namesz = elfcpp::Swap<32, big_endian>::readval(pcontents);
++      size_t descsz = elfcpp::Swap<32, big_endian>::readval(pcontents + 4);
++      unsigned int ntype = elfcpp::Swap<32, big_endian>::readval(pcontents + 8);
++      const unsigned char* pname = pcontents + 12;
++
++      if (namesz != 4 || strcmp(reinterpret_cast<const char*>(pname), "GNU") != 0)
++	{
++	  gold_warning(_("%s: corrupt .note.gnu.property section "
++			 "(name is not 'GNU')"),
++		       this->name().c_str());
++	  return;
++	}
++
++      if (ntype != elfcpp::NT_GNU_PROPERTY_TYPE_0)
++	{
++	  gold_warning(_("%s: unsupported note type %d "
++			 "in .note.gnu.property section"),
++		       this->name().c_str(), ntype);
++	  return;
++	}
++
++      size_t aligned_namesz = align_address(namesz, 4);
++      const unsigned char* pdesc = pname + aligned_namesz;
++
++      if (pdesc + descsz > pcontents + contents_len)
++	{
++	  gold_warning(_("%s: corrupt .note.gnu.property section"),
++		       this->name().c_str());
++	  return;
++	}
++
++      const unsigned char* pprop = pdesc;
++
++      // Loop over the program properties in this note.
++      while (pprop < pdesc + descsz)
++	{
++	  if (pprop + 8 > pdesc + descsz)
++	    {
++	      gold_warning(_("%s: corrupt .note.gnu.property section"),
++			   this->name().c_str());
++	      return;
++	    }
++	  unsigned int pr_type = elfcpp::Swap<32, big_endian>::readval(pprop);
++	  size_t pr_datasz = elfcpp::Swap<32, big_endian>::readval(pprop + 4);
++	  pprop += 8;
++	  if (pprop + pr_datasz > pdesc + descsz)
++	    {
++	      gold_warning(_("%s: corrupt .note.gnu.property section"),
++			   this->name().c_str());
++	      return;
++	    }
++	  layout->layout_gnu_property(ntype, pr_type, pr_datasz, pprop, this);
++	  pprop += align_address(pr_datasz, size / 8);
++	}
++
++      pcontents = pdesc + align_address(descsz, size / 8);
++    }
++}
++
+ // Lay out the input sections.  We walk through the sections and check
+ // whether they should be included in the link.  If they should, we
+ // pass them to the Layout object, which will return an output section
+@@ -1565,6 +1661,14 @@ Sized_relobj_file<size, big_endian>::do_
+ 	      omit[i] = true;
+ 	    }
+ 
++	  // Handle .note.gnu.property sections.
++	  if (sh_type == elfcpp::SHT_NOTE
++	      && strcmp(name, ".note.gnu.property") == 0)
++	    {
++	      this->layout_gnu_property_section(layout, i);
++	      omit[i] = true;
++	    }
++
+ 	  bool discard = omit[i];
+ 	  if (!discard)
+ 	    {
+@@ -1781,7 +1885,10 @@ Sized_relobj_file<size, big_endian>::do_
+     }
+ 
+   if (!is_pass_two)
+-    layout->layout_gnu_stack(seen_gnu_stack, gnu_stack_flags, this);
++    {
++      layout->merge_gnu_properties(this);
++      layout->layout_gnu_stack(seen_gnu_stack, gnu_stack_flags, this);
++    }
+ 
+   // Handle the .eh_frame sections after the other sections.
+   gold_assert(!is_pass_one || eh_frame_sections.empty());
+Only in binutils-2.30/gold: object.cc.orig
+diff -rup binutils.orig/gold/object.h binutils-2.30/gold/object.h
+--- binutils.orig/gold/object.h	2018-08-14 16:18:17.926466993 +0100
++++ binutils-2.30/gold/object.h	2018-08-14 16:18:47.793244187 +0100
+@@ -2647,6 +2647,10 @@ class Sized_relobj_file : public Sized_r
+ 			  unsigned int shndx, const typename This::Shdr&,
+ 			  unsigned int reloc_shndx, unsigned int reloc_type);
+ 
++  // Layout an input .note.gnu.property section.
++  void
++  layout_gnu_property_section(Layout* layout, unsigned int shndx);
++
+   // Write section data to the output file.  Record the views and
+   // sizes in VIEWS for use when relocating.
+   void
+Only in binutils-2.30/gold: object.h.orig
+diff -rup binutils.orig/gold/target.h binutils-2.30/gold/target.h
+--- binutils.orig/gold/target.h	2018-08-14 16:18:17.928466978 +0100
++++ binutils-2.30/gold/target.h	2018-08-14 16:23:15.812244769 +0100
+@@ -504,6 +504,11 @@ class Target
+   should_include_section(elfcpp::Elf_Word sh_type) const
+   { return this->do_should_include_section(sh_type); }
+ 
++  // Finalize the target-specific properties in the .note.gnu.property section.
++  void
++  finalize_gnu_properties(Layout* layout) const
++  { this->do_finalize_gnu_properties(layout); }
++
+  protected:
+   // This struct holds the constant information for a child class.  We
+   // use a struct to avoid the overhead of virtual function calls for
+@@ -807,6 +812,11 @@ class Target
+   do_should_include_section(elfcpp::Elf_Word) const
+   { return true; }
+ 
++  // Finalize the target-specific properties in the .note.gnu.property section.
++  virtual void
++  do_finalize_gnu_properties(Layout*) const
++  { }
++
+  private:
+   // The implementations of the four do_make_elf_object virtual functions are
+   // almost identical except for their sizes and endianness.  We use a template.
+@@ -1126,6 +1136,17 @@ class Sized_target : public Target
+     return elfcpp::elf_r_sym<size>(rel.get_r_info());
+   }
+ 
++  // Record a target-specific program property in the .note.gnu.property
++  // section.
++  virtual void
++  record_gnu_property(int, int, size_t, const unsigned char*, const Object*)
++  { }
++
++  // Merge the target-specific program properties from the current object.
++  virtual void
++  merge_gnu_properties(const Object*)
++  { }
++
+  protected:
+   Sized_target(const Target::Target_info* pti)
+     : Target(pti)
+Only in binutils-2.30/gold: target.h.orig
+Only in binutils-2.30/gold/testsuite: gnu_property_a.S
+Only in binutils-2.30/gold/testsuite: gnu_property_b.S
+Only in binutils-2.30/gold/testsuite: gnu_property_c.S
+Only in binutils-2.30/gold/testsuite: gnu_property_main.c
+Only in binutils-2.30/gold/testsuite: gnu_property_test.sh
+diff -rup binutils.orig/gold/testsuite/Makefile.am binutils-2.30/gold/testsuite/Makefile.am
+--- binutils.orig/gold/testsuite/Makefile.am	2018-08-14 16:18:17.930466963 +0100
++++ binutils-2.30/gold/testsuite/Makefile.am	2018-08-14 16:23:15.812244769 +0100
+@@ -3121,6 +3121,23 @@ exception_x86_64_bnd_2.o: exception_test
+ 	$(CXXCOMPILE) -c -Bgcctestdir/ -Wa,-madd-bnd-prefix -o $@ $<
+ endif DEFAULT_TARGET_X86_64
+ 
++if DEFAULT_TARGET_X86_64
++check_SCRIPTS += gnu_property_test.sh
++check_DATA += gnu_property_test.stdout
++gnu_property_test.stdout: gnu_property_test
++	$(TEST_READELF) -n $< >$@
++gnu_property_test: gcctestdir/ld gnu_property_a.o gnu_property_b.o gnu_property_c.o
++	gcctestdir/ld -o $@ gnu_property_a.o gnu_property_b.o gnu_property_c.o
++gnu_property_main.o: gnu_property_main.c
++	$(COMPILE) -c -o $@ $<
++gnu_property_a.o: gnu_property_a.S
++	$(COMPILE) -c -o $@ $<
++gnu_property_b.o: gnu_property_b.S
++	$(COMPILE) -c -o $@ $<
++gnu_property_c.o: gnu_property_c.S
++	$(COMPILE) -c -o $@ $<
++endif DEFAULT_TARGET_X86_64
++
+ check_PROGRAMS += pr22266
+ pr22266: pr22266_main.o pr22266_ar.o gcctestdir/ld
+ 	$(LINK) -Bgcctestdir/ pr22266_main.o pr22266_ar.o
+Only in binutils-2.30/gold/testsuite: Makefile.am.orig
+diff -rup binutils.orig/gold/testsuite/Makefile.in binutils-2.30/gold/testsuite/Makefile.in
+--- binutils.orig/gold/testsuite/Makefile.in	2018-08-14 16:18:17.939466896 +0100
++++ binutils-2.30/gold/testsuite/Makefile.in	2018-08-14 16:23:15.813244761 +0100
+@@ -814,28 +814,30 @@ check_PROGRAMS = $(am__EXEEXT_1) $(am__E
+ @DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@	two_file_test_tmp_4.o \
+ @DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@	two_file_test_5.a \
+ @DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@	two_file_test_6.a
+-@GCC_TRUE@@NATIVE_LINKER_TRUE@am__append_84 = pr22266
++@DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@am__append_84 = gnu_property_test.sh
++@DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@am__append_85 = gnu_property_test.stdout
++@GCC_TRUE@@NATIVE_LINKER_TRUE@am__append_86 = pr22266
+ 
+ # These tests work with native and cross linkers.
+ 
+ # Test script section order.
+-@NATIVE_OR_CROSS_LINKER_TRUE@am__append_85 = script_test_10.sh
+-@NATIVE_OR_CROSS_LINKER_TRUE@am__append_86 = script_test_10.stdout
+-@NATIVE_OR_CROSS_LINKER_TRUE@am__append_87 = script_test_10
++@NATIVE_OR_CROSS_LINKER_TRUE@am__append_87 = script_test_10.sh
++@NATIVE_OR_CROSS_LINKER_TRUE@am__append_88 = script_test_10.stdout
++@NATIVE_OR_CROSS_LINKER_TRUE@am__append_89 = script_test_10
+ 
+ # These tests work with cross linkers only.
+-@DEFAULT_TARGET_I386_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_88 = split_i386.sh
+-@DEFAULT_TARGET_I386_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_89 = split_i386_1.stdout split_i386_2.stdout \
++@DEFAULT_TARGET_I386_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_90 = split_i386.sh
++@DEFAULT_TARGET_I386_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_91 = split_i386_1.stdout split_i386_2.stdout \
+ @DEFAULT_TARGET_I386_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	split_i386_3.stdout split_i386_4.stdout split_i386_r.stdout
+ 
+-@DEFAULT_TARGET_I386_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_90 = split_i386_1 split_i386_2 split_i386_3 \
++@DEFAULT_TARGET_I386_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_92 = split_i386_1 split_i386_2 split_i386_3 \
+ @DEFAULT_TARGET_I386_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	split_i386_4 split_i386_r
+ 
+-@DEFAULT_TARGET_X86_64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_91 = split_x86_64.sh \
++@DEFAULT_TARGET_X86_64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_93 = split_x86_64.sh \
+ @DEFAULT_TARGET_X86_64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	bnd_plt_1.sh \
+ @DEFAULT_TARGET_X86_64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	bnd_ifunc_1.sh \
+ @DEFAULT_TARGET_X86_64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	bnd_ifunc_2.sh
+-@DEFAULT_TARGET_X86_64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_92 = split_x86_64_1.stdout \
++@DEFAULT_TARGET_X86_64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_94 = split_x86_64_1.stdout \
+ @DEFAULT_TARGET_X86_64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	split_x86_64_2.stdout \
+ @DEFAULT_TARGET_X86_64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	split_x86_64_3.stdout \
+ @DEFAULT_TARGET_X86_64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	split_x86_64_4.stdout \
+@@ -843,14 +845,14 @@ check_PROGRAMS = $(am__EXEEXT_1) $(am__E
+ @DEFAULT_TARGET_X86_64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	bnd_plt_1.stdout \
+ @DEFAULT_TARGET_X86_64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	bnd_ifunc_1.stdout \
+ @DEFAULT_TARGET_X86_64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	bnd_ifunc_2.stdout
+-@DEFAULT_TARGET_X86_64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_93 = split_x86_64_1 split_x86_64_2 split_x86_64_3 \
++@DEFAULT_TARGET_X86_64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_95 = split_x86_64_1 split_x86_64_2 split_x86_64_3 \
+ @DEFAULT_TARGET_X86_64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	split_x86_64_4 split_x86_64_r
+ 
+-@DEFAULT_TARGET_X32_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_94 = split_x32.sh
+-@DEFAULT_TARGET_X32_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_95 = split_x32_1.stdout split_x32_2.stdout \
++@DEFAULT_TARGET_X32_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_96 = split_x32.sh
++@DEFAULT_TARGET_X32_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_97 = split_x32_1.stdout split_x32_2.stdout \
+ @DEFAULT_TARGET_X32_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	split_x32_3.stdout split_x32_4.stdout split_x32_r.stdout
+ 
+-@DEFAULT_TARGET_X32_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_96 = split_x32_1 split_x32_2 split_x32_3 \
++@DEFAULT_TARGET_X32_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_98 = split_x32_1 split_x32_2 split_x32_3 \
+ @DEFAULT_TARGET_X32_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	split_x32_4 split_x32_r
+ 
+ 
+@@ -871,7 +873,7 @@ check_PROGRAMS = $(am__EXEEXT_1) $(am__E
+ # Check Thumb to ARM farcall veneers
+ 
+ # Check handling of --target1-abs, --target1-rel and --target2 options
+-@DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_97 = arm_abs_global.sh \
++@DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_99 = arm_abs_global.sh \
+ @DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	arm_branch_in_range.sh \
+ @DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	arm_branch_out_of_range.sh \
+ @DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	arm_fix_v4bx.sh \
+@@ -894,7 +896,7 @@ check_PROGRAMS = $(am__EXEEXT_1) $(am__E
+ @DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	arm_target2_got_rel.sh
+ 
+ # The test demonstrates why the constructor of a target object should not access options.
+-@DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_98 = arm_abs_global.stdout \
++@DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_100 = arm_abs_global.stdout \
+ @DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	arm_bl_in_range.stdout \
+ @DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	arm_bl_out_of_range.stdout \
+ @DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	thumb_bl_in_range.stdout \
+@@ -947,7 +949,7 @@ check_PROGRAMS = $(am__EXEEXT_1) $(am__E
+ @DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	arm_target2_abs.stdout \
+ @DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	arm_target2_got_rel.stdout \
+ @DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	arm_target_lazy_init
+-@DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_99 = arm_abs_global \
++@DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_101 = arm_abs_global \
+ @DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	arm_bl_in_range \
+ @DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	arm_bl_out_of_range \
+ @DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	thumb_bl_in_range \
+@@ -998,20 +1000,20 @@ check_PROGRAMS = $(am__EXEEXT_1) $(am__E
+ @DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	arm_target2_abs \
+ @DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	arm_target2_got_rel \
+ @DEFAULT_TARGET_ARM_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	arm_target_lazy_init
+-@DEFAULT_TARGET_AARCH64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_100 = aarch64_reloc_none.sh \
++@DEFAULT_TARGET_AARCH64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_102 = aarch64_reloc_none.sh \
+ @DEFAULT_TARGET_AARCH64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	aarch64_relocs.sh \
+ @DEFAULT_TARGET_AARCH64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	pr21430.sh \
+ @DEFAULT_TARGET_AARCH64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	aarch64_tlsdesc.sh
+-@DEFAULT_TARGET_AARCH64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_101 = aarch64_reloc_none.stdout \
++@DEFAULT_TARGET_AARCH64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_103 = aarch64_reloc_none.stdout \
+ @DEFAULT_TARGET_AARCH64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	aarch64_relocs.stdout \
+ @DEFAULT_TARGET_AARCH64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	pr21430.stdout \
+ @DEFAULT_TARGET_AARCH64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	aarch64_tlsdesc.stdout
+-@DEFAULT_TARGET_AARCH64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_102 = aarch64_reloc_none \
++@DEFAULT_TARGET_AARCH64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_104 = aarch64_reloc_none \
+ @DEFAULT_TARGET_AARCH64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	aarch64_relocs \
+ @DEFAULT_TARGET_AARCH64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	pr21430 \
+ @DEFAULT_TARGET_AARCH64_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	aarch64_tlsdesc
+-@DEFAULT_TARGET_S390_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_103 = split_s390.sh
+-@DEFAULT_TARGET_S390_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_104 = split_s390_z1.stdout split_s390_z2.stdout split_s390_z3.stdout \
++@DEFAULT_TARGET_S390_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_105 = split_s390.sh
++@DEFAULT_TARGET_S390_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_106 = split_s390_z1.stdout split_s390_z2.stdout split_s390_z3.stdout \
+ @DEFAULT_TARGET_S390_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	split_s390_z4.stdout split_s390_n1.stdout split_s390_n2.stdout \
+ @DEFAULT_TARGET_S390_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	split_s390_a1.stdout split_s390_a2.stdout split_s390_z1_ns.stdout \
+ @DEFAULT_TARGET_S390_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	split_s390_z2_ns.stdout split_s390_z3_ns.stdout split_s390_z4_ns.stdout \
+@@ -1023,7 +1025,7 @@ check_PROGRAMS = $(am__EXEEXT_1) $(am__E
+ @DEFAULT_TARGET_S390_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	split_s390x_z4_ns.stdout split_s390x_n1_ns.stdout \
+ @DEFAULT_TARGET_S390_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	split_s390x_n2_ns.stdout split_s390x_r.stdout
+ 
+-@DEFAULT_TARGET_S390_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_105 = split_s390_z1 split_s390_z2 split_s390_z3 \
++@DEFAULT_TARGET_S390_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@am__append_107 = split_s390_z1 split_s390_z2 split_s390_z3 \
+ @DEFAULT_TARGET_S390_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	split_s390_z4 split_s390_n1 split_s390_n2 split_s390_a1 \
+ @DEFAULT_TARGET_S390_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	split_s390_a2 split_s390_z1_ns split_s390_z2_ns split_s390_z3_ns \
+ @DEFAULT_TARGET_S390_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	split_s390_z4_ns split_s390_n1_ns split_s390_n2_ns split_s390_r \
+@@ -1032,10 +1034,10 @@ check_PROGRAMS = $(am__EXEEXT_1) $(am__E
+ @DEFAULT_TARGET_S390_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	split_s390x_z1_ns split_s390x_z2_ns split_s390x_z3_ns \
+ @DEFAULT_TARGET_S390_TRUE@@NATIVE_OR_CROSS_LINKER_TRUE@	split_s390x_z4_ns split_s390x_n1_ns split_s390x_n2_ns split_s390x_r
+ 
+-@DEFAULT_TARGET_X86_64_TRUE@am__append_106 = *.dwo *.dwp
+-@DEFAULT_TARGET_X86_64_TRUE@am__append_107 = dwp_test_1.sh \
++@DEFAULT_TARGET_X86_64_TRUE@am__append_108 = *.dwo *.dwp
++@DEFAULT_TARGET_X86_64_TRUE@am__append_109 = dwp_test_1.sh \
+ @DEFAULT_TARGET_X86_64_TRUE@	dwp_test_2.sh
+-@DEFAULT_TARGET_X86_64_TRUE@am__append_108 = dwp_test_1.stdout \
++@DEFAULT_TARGET_X86_64_TRUE@am__append_110 = dwp_test_1.stdout \
+ @DEFAULT_TARGET_X86_64_TRUE@	dwp_test_2.stdout
+ subdir = testsuite
+ DIST_COMMON = $(srcdir)/Makefile.in $(srcdir)/Makefile.am
+@@ -2828,9 +2830,9 @@ MOSTLYCLEANFILES = *.so *.syms *.stdout
+ 	$(am__append_34) $(am__append_37) $(am__append_41) \
+ 	$(am__append_47) $(am__append_51) $(am__append_52) \
+ 	$(am__append_58) $(am__append_78) $(am__append_81) \
+-	$(am__append_83) $(am__append_87) $(am__append_90) \
+-	$(am__append_93) $(am__append_96) $(am__append_99) \
+-	$(am__append_102) $(am__append_105) $(am__append_106)
++	$(am__append_83) $(am__append_89) $(am__append_92) \
++	$(am__append_95) $(am__append_98) $(am__append_101) \
++	$(am__append_104) $(am__append_107) $(am__append_108)
+ 
+ # We will add to these later, for each individual test.  Note
+ # that we add each test under check_SCRIPTS or check_PROGRAMS;
+@@ -2839,18 +2841,18 @@ check_SCRIPTS = $(am__append_2) $(am__ap
+ 	$(am__append_29) $(am__append_35) $(am__append_42) \
+ 	$(am__append_45) $(am__append_49) $(am__append_53) \
+ 	$(am__append_56) $(am__append_62) $(am__append_73) \
+-	$(am__append_76) $(am__append_79) $(am__append_85) \
+-	$(am__append_88) $(am__append_91) $(am__append_94) \
+-	$(am__append_97) $(am__append_100) $(am__append_103) \
+-	$(am__append_107)
++	$(am__append_76) $(am__append_79) $(am__append_84) \
++	$(am__append_87) $(am__append_90) $(am__append_93) \
++	$(am__append_96) $(am__append_99) $(am__append_102) \
++	$(am__append_105) $(am__append_109)
+ check_DATA = $(am__append_3) $(am__append_20) $(am__append_24) \
+ 	$(am__append_30) $(am__append_36) $(am__append_43) \
+ 	$(am__append_46) $(am__append_50) $(am__append_54) \
+ 	$(am__append_57) $(am__append_63) $(am__append_74) \
+-	$(am__append_77) $(am__append_80) $(am__append_86) \
+-	$(am__append_89) $(am__append_92) $(am__append_95) \
+-	$(am__append_98) $(am__append_101) $(am__append_104) \
+-	$(am__append_108)
++	$(am__append_77) $(am__append_80) $(am__append_85) \
++	$(am__append_88) $(am__append_91) $(am__append_94) \
++	$(am__append_97) $(am__append_100) $(am__append_103) \
++	$(am__append_106) $(am__append_110)
+ BUILT_SOURCES = $(am__append_40)
+ TESTS = $(check_SCRIPTS) $(check_PROGRAMS)
+ 
+@@ -5737,6 +5739,8 @@ exception_x86_64_bnd_test.log: exception
+ 	@p='exception_x86_64_bnd_test$(EXEEXT)'; $(am__check_pre) $(LOG_COMPILE) "$$tst" $(am__check_post)
+ pr22266.log: pr22266$(EXEEXT)
+ 	@p='pr22266$(EXEEXT)'; $(am__check_pre) $(LOG_COMPILE) "$$tst" $(am__check_post)
++gnu_property_test.sh.log: gnu_property_test.sh
++	@p='gnu_property_test.sh'; $(am__check_pre) $(LOG_COMPILE) "$$tst" $(am__check_post)
+ .test.log:
+ 	@p='$<'; $(am__check_pre) $(TEST_LOG_COMPILE) "$$tst" $(am__check_post)
+ @am__EXEEXT_TRUE@.test$(EXEEXT).log:
+@@ -7394,6 +7403,18 @@ uninstall-am:
+ @DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@	$(CXXCOMPILE) -c -fpic -Bgcctestdir/ -Wa,-madd-bnd-prefix -o $@ $<
+ @DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@exception_x86_64_bnd_2.o: exception_test_2.cc gcctestdir/as
+ @DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@	$(CXXCOMPILE) -c -Bgcctestdir/ -Wa,-madd-bnd-prefix -o $@ $<
++@DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@gnu_property_test.stdout: gnu_property_test
++@DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@	$(TEST_READELF) -n $< >$@
++@DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@gnu_property_test: gcctestdir/ld gnu_property_a.o gnu_property_b.o gnu_property_c.o
++@DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@	gcctestdir/ld -o $@ gnu_property_a.o gnu_property_b.o gnu_property_c.o
++@DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@gnu_property_main.o: gnu_property_main.c
++@DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@	$(COMPILE) -c -o $@ $<
++@DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@gnu_property_a.o: gnu_property_a.S
++@DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@	$(COMPILE) -c -o $@ $<
++@DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@gnu_property_b.o: gnu_property_b.S
++@DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@	$(COMPILE) -c -o $@ $<
++@DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@gnu_property_c.o: gnu_property_c.S
++@DEFAULT_TARGET_X86_64_TRUE@@GCC_TRUE@@NATIVE_LINKER_TRUE@	$(COMPILE) -c -o $@ $<
+ @GCC_TRUE@@NATIVE_LINKER_TRUE@pr22266: pr22266_main.o pr22266_ar.o gcctestdir/ld
+ @GCC_TRUE@@NATIVE_LINKER_TRUE@	$(LINK) -Bgcctestdir/ pr22266_main.o pr22266_ar.o
+ @GCC_TRUE@@NATIVE_LINKER_TRUE@pr22266_ar.o: pr22266_a.o gcctestdir/ld
+Only in binutils-2.30/gold/testsuite: Makefile.in.orig
+Only in binutils-2.30/gold/testsuite: Makefile.in.rej
+diff -rup binutils.orig/gold/x86_64.cc binutils-2.30/gold/x86_64.cc
+--- binutils.orig/gold/x86_64.cc	2018-08-14 16:18:17.926466993 +0100
++++ binutils-2.30/gold/x86_64.cc	2018-08-14 16:23:26.758163112 +0100
+@@ -590,7 +590,8 @@ class Target_x86_64 : public Sized_targe
+       got_tlsdesc_(NULL), global_offset_table_(NULL), rela_dyn_(NULL),
+       rela_irelative_(NULL), copy_relocs_(elfcpp::R_X86_64_COPY),
+       got_mod_index_offset_(-1U), tlsdesc_reloc_info_(),
+-      tls_base_symbol_defined_(false)
++      tls_base_symbol_defined_(false), isa_1_used_(0), isa_1_needed_(0),
++      feature_1_(0), object_feature_1_(0), seen_first_object_(false)
+   { }
+ 
+   // Hook for a new output section.
+@@ -1188,6 +1189,20 @@ class Target_x86_64 : public Sized_targe
+ 				  this->rela_dyn_section(layout));
+   }
+ 
++  // Record a target-specific program property in the .note.gnu.property
++  // section.
++  void
++  record_gnu_property(int, int, size_t, const unsigned char*, const Object*);
++
++  // Merge the target-specific program properties from the current object.
++  void
++  merge_gnu_properties(const Object*);
++
++  // Finalize the target-specific program properties and add them back to
++  // the layout.
++  void
++  do_finalize_gnu_properties(Layout*) const;
++
+   // Information about this specific target which we pass to the
+   // general Target structure.
+   static const Target::Target_info x86_64_info;
+@@ -1245,6 +1260,17 @@ class Target_x86_64 : public Sized_targe
+   std::vector<Tlsdesc_info> tlsdesc_reloc_info_;
+   // True if the _TLS_MODULE_BASE_ symbol has been defined.
+   bool tls_base_symbol_defined_;
++  // Target-specific program properties, from .note.gnu.property section.
++  // Each bit represents a specific feature.
++  uint32_t isa_1_used_;
++  uint32_t isa_1_needed_;
++  uint32_t feature_1_;
++  // Target-specific properties from the current object.
++  // These bits get ANDed into FEATURE_1_ after all properties for the object
++  // have been processed.
++  uint32_t object_feature_1_;
++  // Whether we have seen our first object, for use in initializing FEATURE_1_.
++  bool seen_first_object_;
+ };
+ 
+ template<>
+@@ -1431,6 +1457,93 @@ Target_x86_64<size>::rela_irelative_sect
+   return this->rela_irelative_;
+ }
+ 
++// Record a target-specific program property from the .note.gnu.property
++// section.
++template<int size>
++void
++Target_x86_64<size>::record_gnu_property(
++    int, int pr_type,
++    size_t pr_datasz, const unsigned char* pr_data,
++    const Object* object)
++{
++  uint32_t val = 0;
++
++  switch (pr_type)
++    {
++    case elfcpp::GNU_PROPERTY_X86_ISA_1_USED:
++    case elfcpp::GNU_PROPERTY_X86_ISA_1_NEEDED:
++    case elfcpp::GNU_PROPERTY_X86_FEATURE_1_AND:
++      if (pr_datasz != 4)
++	{
++	  gold_warning(_("%s: corrupt .note.gnu.property section "
++			 "(pr_datasz for property %d is not 4)"),
++		       object->name().c_str(), pr_type);
++	  return;
++	}
++      val = elfcpp::Swap<32, false>::readval(pr_data);
++      break;
++    default:
++      gold_warning(_("%s: unknown program property type 0x%x "
++		     "in .note.gnu.property section"),
++		   object->name().c_str(), pr_type);
++      break;
++    }
++
++  switch (pr_type)
++    {
++    case elfcpp::GNU_PROPERTY_X86_ISA_1_USED:
++      this->isa_1_used_ |= val;
++      break;
++    case elfcpp::GNU_PROPERTY_X86_ISA_1_NEEDED:
++      this->isa_1_needed_ |= val;
++      break;
++    case elfcpp::GNU_PROPERTY_X86_FEATURE_1_AND:
++      // If we see multiple feature props in one object, OR them together.
++      this->object_feature_1_ |= val;
++      break;
++    }
++}
++
++// Merge the target-specific program properties from the current object.
++template<int size>
++void
++Target_x86_64<size>::merge_gnu_properties(const Object*)
++{
++  if (this->seen_first_object_)
++    this->feature_1_ &= this->object_feature_1_;
++  else
++    {
++      this->feature_1_ = this->object_feature_1_;
++      this->seen_first_object_ = true;
++    }
++  this->object_feature_1_ = 0;
++}
++
++static inline void
++add_property(Layout* layout, unsigned int pr_type, uint32_t val)
++{
++  unsigned char buf[4];
++  elfcpp::Swap<32, false>::writeval(buf, val);
++  layout->add_gnu_property(elfcpp::NT_GNU_PROPERTY_TYPE_0, pr_type, 4, buf);
++}
++
++// Finalize the target-specific program properties and add them back to
++// the layout.
++template<int size>
++void
++Target_x86_64<size>::do_finalize_gnu_properties(Layout* layout) const
++{
++  if (this->isa_1_used_ != 0)
++    add_property(layout, elfcpp::GNU_PROPERTY_X86_ISA_1_USED,
++		 this->isa_1_used_);
++  if (this->isa_1_needed_ != 0)
++    add_property(layout, elfcpp::GNU_PROPERTY_X86_ISA_1_NEEDED,
++		 this->isa_1_needed_);
++  if (this->feature_1_ != 0)
++    add_property(layout, elfcpp::GNU_PROPERTY_X86_FEATURE_1_AND,
++		 this->feature_1_);
++}
++
+ // Write the first three reserved words of the .got.plt section.
+ // The remainder of the section is written while writing the PLT
+ // in Output_data_plt_i386::do_write.
+Only in binutils-2.30/gold: x86_64.cc.orig
+--- /dev/null	2018-08-14 08:11:42.835432884 +0100
++++ binutils-2.30/gold/testsuite/gnu_property_a.S	2018-08-14 16:23:15.813244761 +0100
+@@ -0,0 +1,46 @@
++#define NT_GNU_PROPERTY_TYPE_0 5
++
++#define GNU_PROPERTY_STACK_SIZE 1
++#define GNU_PROPERTY_X86_ISA_1_USED 0xc0000000
++#define GNU_PROPERTY_X86_ISA_1_NEEDED 0xc0000001
++#define GNU_PROPERTY_X86_FEATURE_1_AND 0xc0000002
++
++#if __SIZEOF_PTRDIFF_T__  == 8
++# define ALIGN 3
++#elif __SIZEOF_PTRDIFF_T__  == 4
++# define ALIGN 2
++#endif
++
++	.text
++	.globl _start
++_start:
++	ret
++
++        .section ".note.gnu.property", "a"
++        .p2align ALIGN
++
++        .long 1f - 0f           /* name length */
++        .long 5f - 2f           /* data length */
++        .long NT_GNU_PROPERTY_TYPE_0    /* note type */
++0:      .asciz "GNU"            /* vendor name */
++1:
++        .p2align ALIGN
++2:      .long GNU_PROPERTY_STACK_SIZE   /* pr_type.  */
++        .long 4f - 3f   /* pr_datasz.  */
++3:
++        .dc.a 0x800     /* Stack size.  */
++4:
++        .p2align ALIGN
++	.long GNU_PROPERTY_X86_ISA_1_USED
++	.long 4
++	.byte 0x01,0x10,0x00,0x00
++        .p2align ALIGN
++	.long GNU_PROPERTY_X86_ISA_1_NEEDED
++	.long 4
++	.byte 0x01,0x10,0x00,0x00
++        .p2align ALIGN
++	.long GNU_PROPERTY_X86_FEATURE_1_AND
++	.long 4
++	.byte 0x01,0x00,0x00,0x00
++        .p2align ALIGN
++5:
+--- /dev/null	2018-08-14 08:11:42.835432884 +0100
++++ binutils-2.30/gold/testsuite/gnu_property_b.S	2018-08-14 16:18:47.795244173 +0100
+@@ -0,0 +1,38 @@
++#define NT_GNU_PROPERTY_TYPE_0 5
++
++#define GNU_PROPERTY_STACK_SIZE 1
++#define GNU_PROPERTY_NO_COPY_ON_PROTECTED 2
++#define GNU_PROPERTY_X86_ISA_1_USED 0xc0000000
++#define GNU_PROPERTY_X86_ISA_1_NEEDED 0xc0000001
++#define GNU_PROPERTY_X86_FEATURE_1_AND 0xc0000002
++
++#if __SIZEOF_PTRDIFF_T__  == 8
++# define ALIGN 3
++#elif __SIZEOF_PTRDIFF_T__  == 4
++# define ALIGN 2
++#endif
++
++        .section ".note.gnu.property", "a"
++        .p2align ALIGN
++        .long 1f - 0f           /* name length */
++        .long 3f - 2f           /* data length */
++        .long NT_GNU_PROPERTY_TYPE_0    /* note type */
++0:      .asciz "GNU"            /* vendor name */
++1:
++        .p2align ALIGN
++2:      .long GNU_PROPERTY_NO_COPY_ON_PROTECTED /* pr_type.  */
++        .long 0 /* pr_datasz.  */
++        .p2align ALIGN
++	.long GNU_PROPERTY_X86_ISA_1_USED
++	.long 4
++	.byte 0x01,0x11,0x00,0x00
++        .p2align ALIGN
++	.long GNU_PROPERTY_X86_ISA_1_NEEDED
++	.long 4
++	.byte 0x01,0x11,0x00,0x00
++        .p2align ALIGN
++	.long GNU_PROPERTY_X86_FEATURE_1_AND
++	.long 4
++	.byte 0x03,0x00,0x00,0x00
++        .p2align ALIGN
++3:
+--- /dev/null	2018-08-14 08:11:42.835432884 +0100
++++ binutils-2.30/gold/testsuite/gnu_property_c.S	2018-08-14 16:18:47.795244173 +0100
+@@ -0,0 +1,44 @@
++#define NT_GNU_PROPERTY_TYPE_0 5
++
++#define GNU_PROPERTY_STACK_SIZE 1
++#define GNU_PROPERTY_NO_COPY_ON_PROTECTED 2
++#define GNU_PROPERTY_X86_ISA_1_USED 0xc0000000
++#define GNU_PROPERTY_X86_ISA_1_NEEDED 0xc0000001
++#define GNU_PROPERTY_X86_FEATURE_1_AND 0xc0000002
++
++#if __SIZEOF_PTRDIFF_T__  == 8
++# define ALIGN 3
++#elif __SIZEOF_PTRDIFF_T__  == 4
++# define ALIGN 2
++#endif
++
++        .section ".note.gnu.property", "a"
++        .p2align ALIGN
++        .long 1f - 0f           /* name length */
++        .long 5f - 2f           /* data length */
++        .long NT_GNU_PROPERTY_TYPE_0    /* note type */
++0:      .asciz "GNU"            /* vendor name */
++1:
++        .p2align ALIGN
++2:      .long GNU_PROPERTY_STACK_SIZE   /* pr_type.  */
++        .long 4f - 3f   /* pr_datasz.  */
++3:
++        .dc.a 0x111100  /* Stack size.  */
++4:
++        .p2align ALIGN
++        .long GNU_PROPERTY_NO_COPY_ON_PROTECTED /* pr_type.  */
++        .long 0 /* pr_datasz.  */
++        .p2align ALIGN
++	.long GNU_PROPERTY_X86_ISA_1_USED
++	.long 4
++	.byte 0x11,0x10,0x00,0x00
++        .p2align ALIGN
++	.long GNU_PROPERTY_X86_ISA_1_NEEDED
++	.long 4
++	.byte 0x11,0x10,0x00,0x00
++        .p2align ALIGN
++	.long GNU_PROPERTY_X86_FEATURE_1_AND
++	.long 4
++	.byte 0x01,0x00,0x00,0x00
++        .p2align ALIGN
++5:
+--- /dev/null	2018-08-14 08:11:42.835432884 +0100
++++ binutils-2.30/gold/testsuite/gnu_property_main.c	2018-08-14 16:18:47.795244173 +0100
+@@ -0,0 +1,5 @@
++int
++main(void)
++{
++  return 0;
++}
+--- /dev/null	2018-08-14 08:11:42.835432884 +0100
++++ binutils-2.30/gold/testsuite/gnu_property_test.sh	2018-08-14 16:18:47.795244173 +0100
+@@ -0,0 +1,64 @@
++#!/bin/sh
++
++# gnu_property_test.sh -- test .note.gnu.property section.
++
++# Copyright (C) 2018 Free Software Foundation, Inc.
++# Written by Cary Coutant <ccoutant@gmail.com>.
++
++# This file is part of gold.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++
++# You should have received a copy of the GNU General Public License
++# along with this program; if not, write to the Free Software
++# Foundation, Inc., 51 Franklin Street - Fifth Floor, Boston,
++# MA 02110-1301, USA.
++
++# This script checks that after linking the three object files
++# gnu_property_[abc].S, each of which contains a .note.gnu.property
++# section, the resulting output has only a single such note section,
++# and that the properties have been correctly combined.
++
++check()
++{
++    if ! grep -q "$2" "$1"
++    then
++	echo "Did not find expected output in $1:"
++	echo "   $2"
++	echo ""
++	echo "Actual output below:"
++	cat "$1"
++	exit 1
++    fi
++}
++
++check_count()
++{
++    if test "`grep -c "$2" "$1"`" != "$3"
++    then
++	echo "Did not find correct number of note sections in $1:"
++	echo "   $2"
++	echo ""
++	echo "Actual output below:"
++	cat "$1"
++	exit 1
++    fi
++}
++
++check_count gnu_property_test.stdout "GNU\s*0x[0-9a-f]*\s*NT_GNU_PROPERTY_TYPE_0" 1
++
++check gnu_property_test.stdout "stack size: 0x111100"
++check gnu_property_test.stdout "no copy on protected"
++check gnu_property_test.stdout "x86 ISA used: i486, SSE2, SSE4_2, AVX512CD"
++check gnu_property_test.stdout "x86 ISA needed: i486, SSE2, SSE4_2, AVX512CD"
++check gnu_property_test.stdout "x86 feature: IBT"
++
++exit 0
+--- binutils.orig/elfcpp/elfcpp.h	2018-08-14 16:18:18.007466389 +0100
++++ binutils-2.30/elfcpp/elfcpp.h	2018-08-14 16:36:27.151339505 +0100
+@@ -984,7 +984,9 @@ enum
+   NT_GNU_BUILD_ID = 3,
+   // The version of gold used to link.  Th descriptor is just a
+   // string.
+-  NT_GNU_GOLD_VERSION = 4
++  NT_GNU_GOLD_VERSION = 4,
++  // Program property note, as described in "Linux Extensions to the gABI".
++  NT_GNU_PROPERTY_TYPE_0 = 5
+ };
+ 
+ // The OS values which may appear in word 0 of a NT_GNU_ABI_TAG note.
+@@ -999,6 +1001,21 @@ enum
+   ELF_NOTE_OS_SYLLABLE = 5
+ };
+ 
++// Program property types for NT_GNU_PROPERTY_TYPE_0.
++
++enum
++{
++  GNU_PROPERTY_STACK_SIZE = 1,
++  GNU_PROPERTY_NO_COPY_ON_PROTECTED = 2,
++  GNU_PROPERTY_LOPROC = 0xc0000000,
++  GNU_PROPERTY_X86_ISA_1_USED = 0xc0000000,
++  GNU_PROPERTY_X86_ISA_1_NEEDED = 0xc0000001,
++  GNU_PROPERTY_X86_FEATURE_1_AND = 0xc0000002,
++  GNU_PROPERTY_HIPROC = 0xdfffffff,
++  GNU_PROPERTY_LOUSER = 0xe0000000,
++  GNU_PROPERTY_HIUSER = 0xffffffff
++};
++
+ } // End namespace elfcpp.
+ 
+ // Include internal details after defining the types.
+--- binutils.orig/elfcpp/x86_64.h	2018-08-14 16:18:18.006466396 +0100
++++ binutils-2.30/elfcpp/x86_64.h	2018-08-14 16:36:55.838125405 +0100
+@@ -103,6 +103,12 @@ enum
+   R_X86_64_GNU_VTENTRY = 251
+ };
+ 
++// The bit values that can appear in the GNU_PROPERTY_X86_FEATURE_1_AND
++// program property.
++
++const uint64_t GNU_PROPERTY_X86_FEATURE_1_IBT = 1ULL << 0;
++const uint64_t GNU_PROPERTY_X86_FEATURE_1_SHSTK = 1ULL << 1;
++
+ } // End namespace elfcpp.
+ 
+ #endif // !defined(ELFCPP_X86_64_H)
+--- binutils.orig/gold/object.cc	2018-08-14 16:43:20.553254144 +0100
++++ binutils-2.30/gold/object.cc	2018-08-14 16:43:35.275144269 +0100
+@@ -1618,6 +1618,7 @@ Sized_relobj_file<size, big_endian>::do_
+   for (unsigned int i = 1; i < shnum; ++i, pshdrs += This::shdr_size)
+     {
+       typename This::Shdr shdr(pshdrs);
++      unsigned int sh_type = shdr.get_sh_type();
+ 
+       if (shdr.get_sh_name() >= section_names_size)
+ 	{

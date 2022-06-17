@@ -1,0 +1,97 @@
+diff -rup binutils.orig/binutils/doc/binutils.texi binutils-2.30/binutils/doc/binutils.texi
+--- binutils.orig/binutils/doc/binutils.texi	2020-04-07 16:11:52.164358203 +0100
++++ binutils-2.30/binutils/doc/binutils.texi	2020-04-07 16:14:37.759171936 +0100
+@@ -1586,7 +1586,9 @@ recognized names are @samp{alloc}, @samp
+ for a section which does not have contents, but it is not meaningful
+ to clear the @samp{contents} flag of a section which does have
+ contents--just remove the section instead.  Not all flags are
+-meaningful for all object file formats.
++meaningful for all object file formats.  In particular the
++@samp{share} flag is only meaningful for COFF format files and not for
++ELF format files.
+ 
+ @item --add-section @var{sectionname}=@var{filename}
+ Add a new section named @var{sectionname} while copying the file.  The
+@@ -1637,7 +1639,8 @@ Rename a section from @var{oldname} to @
+ changing the section's flags to @var{flags} in the process.  This has
+ the advantage over using a linker script to perform the rename in that
+ the output stays as an object file and does not become a linked
+-executable.
++executable.  This option accepts the same set of flags as the
++@option{--sect-section-flags} option.
+ 
+ This option is particularly helpful when the input format is binary,
+ since this will always create a section called .data.  If for example,
+diff -rup binutils.orig/binutils/objcopy.c binutils-2.30/binutils/objcopy.c
+--- binutils.orig/binutils/objcopy.c	2020-04-07 16:11:52.177358110 +0100
++++ binutils-2.30/binutils/objcopy.c	2020-04-07 16:16:15.736470047 +0100
+@@ -2514,6 +2514,23 @@ merge_gnu_build_notes (bfd *          ab
+   return size;
+ }
+ 
++static flagword
++check_new_section_flags (flagword flags, bfd * abfd, const char * secname)
++{
++  /* Only set the SEC_COFF_SHARED flag on COFF files.
++     The same bit value is used by ELF targets to indicate
++     compressed sections, and setting that flag here breaks
++     things.  */
++  if ((flags & SEC_COFF_SHARED)
++      && bfd_get_flavour (abfd) != bfd_target_coff_flavour)
++    {
++      non_fatal (_("%s[%s]: Note - dropping 'share' flag as output format is not COFF"),
++		 bfd_get_filename (abfd), secname);
++      flags &= ~ SEC_COFF_SHARED;
++    }
++  return flags;
++}
++
+ /* Copy object file IBFD onto OBFD.
+    Returns TRUE upon success, FALSE otherwise.  */
+ 
+@@ -2755,7 +2772,10 @@ copy_object (bfd *ibfd, bfd *obfd, const
+ 	  pset = find_section_list (padd->name, FALSE,
+ 				    SECTION_CONTEXT_SET_FLAGS);
+ 	  if (pset != NULL)
+-	    flags = pset->flags | SEC_HAS_CONTENTS;
++	    {	      
++	      flags = pset->flags | SEC_HAS_CONTENTS;
++	      flags = check_new_section_flags (flags, obfd, padd->name);
++	    }
+ 	  else
+ 	    flags = SEC_HAS_CONTENTS | SEC_READONLY | SEC_DATA;
+ 
+@@ -3867,6 +3887,7 @@ setup_section (bfd *ibfd, sec_ptr isecti
+   flagword flags;
+   const char *err;
+   const char * name;
++  const char * new_name;
+   char *prefix = NULL;
+   bfd_boolean make_nobits;
+ 
+@@ -3876,7 +3897,12 @@ setup_section (bfd *ibfd, sec_ptr isecti
+   /* Get the, possibly new, name of the output section.  */
+   name = bfd_section_name (ibfd, isection);
+   flags = bfd_get_section_flags (ibfd, isection);
+-  name = find_section_rename (name, &flags);
++  new_name = find_section_rename (name, &flags);
++  if (new_name != name)
++    {
++      name = new_name;
++      flags = check_new_section_flags (flags, obfd, name);
++    }
+ 
+   /* Prefix sections.  */
+   if ((prefix_alloc_sections_string)
+@@ -3900,7 +3926,10 @@ setup_section (bfd *ibfd, sec_ptr isecti
+   p = find_section_list (bfd_section_name (ibfd, isection), FALSE,
+ 			 SECTION_CONTEXT_SET_FLAGS);
+   if (p != NULL)
+-    flags = p->flags | (flags & (SEC_HAS_CONTENTS | SEC_RELOC));
++    {
++      flags = p->flags | (flags & (SEC_HAS_CONTENTS | SEC_RELOC));
++      flags = check_new_section_flags (flags, obfd, bfd_section_name (ibfd, isection));
++    }
+   else if (strip_symbols == STRIP_NONDEBUG
+ 	   && (flags & (SEC_ALLOC | SEC_GROUP)) != 0
+ 	   && !is_nondebug_keep_contents_section (ibfd, isection))

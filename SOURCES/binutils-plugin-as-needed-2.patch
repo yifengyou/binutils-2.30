@@ -1,0 +1,212 @@
+diff -rup binutils.orig/bfd/elflink.c binutils-2.30/bfd/elflink.c
+--- binutils.orig/bfd/elflink.c	2021-03-18 14:33:03.462295923 +0000
++++ binutils-2.30/bfd/elflink.c	2021-03-18 14:37:34.110465450 +0000
+@@ -4661,7 +4661,10 @@ error_free_dyn:
+ 	     object and a shared object.  */
+ 	  bfd_boolean dynsym = FALSE;
+ 
+-	  if (! dynamic)
++	  /* Plugin symbols aren't normal.  Don't set def/ref flags.  */
++	  if ((abfd->flags & BFD_PLUGIN) != 0)
++	    ;
++	  else if (!dynamic)
+ 	    {
+ 	      if (! definition)
+ 		{
+@@ -4678,14 +4681,6 @@ error_free_dyn:
+ 		      h->ref_dynamic = 1;
+ 		    }
+ 		}
+-
+-	      /* If the indirect symbol has been forced local, don't
+-		 make the real symbol dynamic.  */
+-	      if ((h == hi || !hi->forced_local)
+-		  && (bfd_link_dll (info)
+-		      || h->def_dynamic
+-		      || h->ref_dynamic))
+-		dynsym = TRUE;
+ 	    }
+ 	  else
+ 	    {
+@@ -4699,14 +4694,25 @@ error_free_dyn:
+ 		  h->def_dynamic = 1;
+ 		  hi->def_dynamic = 1;
+ 		}
++	    }
+ 
+-	      /* If the indirect symbol has been forced local, don't
+-		 make the real symbol dynamic.  */
+-	      if ((h == hi || !hi->forced_local)
+-		  && (h->def_regular
+-		      || h->ref_regular
+-		      || (h->is_weakalias
+-			  && weakdef (h)->dynindx != -1)))
++	  /* If an indirect symbol has been forced local, don't
++	     make the real symbol dynamic.  */
++	  if (h != hi && hi->forced_local)
++	    ;
++	  else if (!dynamic)
++	    {
++	      if (bfd_link_dll (info)
++		  || h->def_dynamic
++		  || h->ref_dynamic)
++		dynsym = TRUE;
++	    }
++	  else
++	    {
++	      if (h->def_regular
++		  || h->ref_regular
++		  || (h->is_weakalias
++		      && weakdef (h)->dynindx != -1))
+ 		dynsym = TRUE;
+ 	    }
+ 
+@@ -4841,6 +4847,10 @@ error_free_dyn:
+ 	      && !bfd_link_relocatable (info))
+ 	    dynsym = FALSE;
+ 
++	  /* Nor should we make plugin symbols dynamic.  */
++	  if ((abfd->flags & BFD_PLUGIN) != 0)
++	    dynsym = FALSE;
++
+ 	  if (definition)
+ 	    {
+ 	      h->target_internal = isym->st_target_internal;
+@@ -4866,8 +4876,8 @@ error_free_dyn:
+ 		  nondeflt_vers[nondeflt_vers_cnt++] = h;
+ 		}
+ 	    }
+-
+-	  if (dynsym && (abfd->flags & BFD_PLUGIN) == 0 && h->dynindx == -1)
++	
++	  if (dynsym && h->dynindx == -1)
+ 	    {
+ 	      if (! bfd_elf_link_record_dynamic_symbol (info, h))
+ 		goto error_free_vers;
+@@ -4897,9 +4907,10 @@ error_free_dyn:
+ 	      && matched
+ 	      && definition
+ 	      && ((dynsym
+-		   && h->ref_regular_nonweak
+-		   && (old_bfd == NULL
+-		       || (old_bfd->flags & BFD_PLUGIN) == 0))
++		   && h->ref_regular_nonweak)
++		  || (old_bfd != NULL
++		      && (old_bfd->flags & BFD_PLUGIN) != 0
++		      && bind != STB_WEAK)
+ 		  || (h->ref_dynamic_nonweak
+ 		      && (elf_dyn_lib_class (abfd) & DYN_AS_NEEDED) != 0
+ 		      && !on_needed_list (elf_dt_name (abfd),
+Only in binutils-2.30/ld/testsuite/ld-plugin: lto-19.h
+Only in binutils-2.30/ld/testsuite/ld-plugin: lto-19a.c
+Only in binutils-2.30/ld/testsuite/ld-plugin: lto-19b.c
+Only in binutils-2.30/ld/testsuite/ld-plugin: lto-19c.c
+diff -rup binutils.orig/ld/testsuite/ld-plugin/lto.exp binutils-2.30/ld/testsuite/ld-plugin/lto.exp
+--- binutils.orig/ld/testsuite/ld-plugin/lto.exp	2021-03-18 14:33:02.366303344 +0000
++++ binutils-2.30/ld/testsuite/ld-plugin/lto.exp	2021-03-18 14:41:51.419725611 +0000
+@@ -133,7 +133,16 @@ set lto_link_tests [list \
+    {lto-15a.c} {} ""] \
+   [list "Build liblto-15.a" \
+    "$plug_opt" "-flto" \
+-   {lto-15b.c} {} "liblto-15.a"] \
++       {lto-15b.c} {} "liblto-15.a"] \
++  [list {liblto-19.a} \
++   "$plug_opt" {-flto -O2 -fPIC} \
++   {lto-19a.c} {} {liblto-19.a}] \
++  [list {compile lto-19b.c} \
++   "$plug_opt" {-flto -O2 -fPIC} \
++   {lto-19b.c} {} {} {c}] \
++  [list {liblto-19.so} \
++   {-shared tmpdir/lto-19b.o tmpdir/liblto-19.a} {-O2 -fPIC} \
++   {dummy.c} {} {liblto-19.so}] \
+   [list "PR ld/12696" \
+    "-O2 -flto -fuse-linker-plugin -r -nostdlib" "-O2 -flto" \
+    {pr12696-1.cc} {} "pr12696-1r.o" "c++"] \
+@@ -244,6 +253,9 @@ set lto_link_tests [list \
+    {dummy.c} \
+    {{error_output "pr26267.err"}} \
+    "pr26267b"] \
++  [list {pr26806.so} \
++   {-shared} {-fpic -O2 -flto} \
++   {pr26806.c} {{nm {-D} pr26806.d}} {pr26806.so}] \
+ ]
+ 
+ if { [at_least_gcc_version 4 7] } {
+@@ -438,6 +450,10 @@ set lto_run_elf_shared_tests [list \
+   [list {pr22220b} \
+    {-flto -fuse-linker-plugin -Wl,--no-as-needed tmpdir/pr22220lib.so tmpdir/pr22220main.o} {} \
+    {dummy.c} {pr22220b.exe} {pass.out} {} {c++}] \
++  [list {lto-19} \
++   {-Wl,--as-needed,-R,tmpdir} {} \
++   {lto-19a.c lto-19b.c lto-19c.c} {lto-19.exe} {pass.out} {-flto -O2} {c} {} \
++   {tmpdir/liblto-19.so tmpdir/liblto-19.a}] \
+ ]
+ 
+ # LTO run-time tests for ELF
+Only in binutils-2.30/ld/testsuite/ld-plugin: pr26806.c
+Only in binutils-2.30/ld/testsuite/ld-plugin: pr26806.d
+--- /dev/null	2021-03-18 09:46:54.398732368 +0000
++++ binutils-2.30/ld/testsuite/ld-plugin/lto-19.h	2021-03-18 14:38:53.903925902 +0000
+@@ -0,0 +1,6 @@
++struct re_dfa_t {
++  const int *sb_char;
++};
++struct re_dfa_t *xregcomp (void);
++struct re_dfa_t *rpl_regcomp (void);
++void rpl_regfree (struct re_dfa_t *);
+--- /dev/null	2021-03-18 09:46:54.398732368 +0000
++++ binutils-2.30/ld/testsuite/ld-plugin/lto-19a.c	2021-03-18 14:38:53.903925902 +0000
+@@ -0,0 +1,19 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include "lto-19.h"
++
++static const int utf8_sb_map[4] = { 0x12, 0x34, 0x56, 0x78 };
++
++struct re_dfa_t *
++rpl_regcomp ()
++{
++  struct re_dfa_t *dfa = malloc (sizeof (struct re_dfa_t));
++  dfa->sb_char = utf8_sb_map;
++  return dfa;
++}
++
++void
++rpl_regfree (struct re_dfa_t *dfa)
++{
++  puts (dfa->sb_char == utf8_sb_map ? "PASS" : "FAIL");
++}
+--- /dev/null	2021-03-18 09:46:54.398732368 +0000
++++ binutils-2.30/ld/testsuite/ld-plugin/lto-19b.c	2021-03-18 14:38:53.903925902 +0000
+@@ -0,0 +1,7 @@
++#include "lto-19.h"
++
++struct re_dfa_t *
++xregcomp (void)
++{
++  return rpl_regcomp ();
++}
+--- /dev/null	2021-03-18 09:46:54.398732368 +0000
++++ binutils-2.30/ld/testsuite/ld-plugin/lto-19c.c	2021-03-18 14:38:53.903925902 +0000
+@@ -0,0 +1,9 @@
++#include "lto-19.h"
++
++int
++main ()
++{
++  struct re_dfa_t *dfa = xregcomp ();
++  rpl_regfree (dfa);
++  return 0;
++}
+--- /dev/null	2021-03-18 09:46:54.398732368 +0000
++++ binutils-2.30/ld/testsuite/ld-plugin/pr26806.c	2021-03-18 14:39:16.319774345 +0000
+@@ -0,0 +1,2 @@
++#include <unistd.h>
++int foo (int x) { if (__builtin_constant_p (x)) return getpid (); return 0; }
+--- /dev/null	2021-03-18 09:46:54.398732368 +0000
++++ binutils-2.30/ld/testsuite/ld-plugin/pr26806.d	2021-03-18 14:39:16.319774345 +0000
+@@ -0,0 +1,4 @@
++#failif
++#...
++.* _*getpid[@ ].*
++#...

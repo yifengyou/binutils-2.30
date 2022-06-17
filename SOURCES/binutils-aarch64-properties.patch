@@ -1,0 +1,547 @@
+diff -rup binutils.orig/bfd/elfnn-aarch64.c binutils-2.30/bfd/elfnn-aarch64.c
+--- binutils.orig/bfd/elfnn-aarch64.c	2020-11-04 14:53:52.144476367 +0000
++++ binutils-2.30/bfd/elfnn-aarch64.c	2020-11-04 14:56:42.275422499 +0000
+@@ -2191,6 +2191,9 @@ struct elf_aarch64_obj_tdata
+ 
+   /* Zero to warn when linking objects with incompatible wchar_t sizes.  */
+   int no_wchar_size_warning;
++
++  /* All GNU_PROPERTY_AARCH64_FEATURE_1_AND properties.  */
++  uint32_t gnu_and_prop;
+ };
+ 
+ #define elf_aarch64_tdata(bfd)				\
+@@ -9311,6 +9314,32 @@ elfNN_aarch64_backend_symbol_processing
+     sym->flags |= BSF_KEEP;
+ }
+ 
++/* Implement elf_backend_setup_gnu_properties for AArch64.  It serves as a
++   wrapper function for _bfd_aarch64_elf_link_setup_gnu_properties to account
++   for the effect of GNU properties of the output_bfd.  */
++static bfd *
++elfNN_aarch64_link_setup_gnu_properties (struct bfd_link_info *info)
++{
++  uint32_t prop = elf_aarch64_tdata (info->output_bfd)->gnu_and_prop;
++  bfd *pbfd = _bfd_aarch64_elf_link_setup_gnu_properties (info, &prop);
++  elf_aarch64_tdata (info->output_bfd)->gnu_and_prop = prop;
++  return pbfd;
++}
++
++/* Implement elf_backend_merge_gnu_properties for AArch64.  It serves as a
++   wrapper function for _bfd_aarch64_elf_merge_gnu_properties to account
++   for the effect of GNU properties of the output_bfd.  */
++static bfd_boolean
++elfNN_aarch64_merge_gnu_properties (struct bfd_link_info *info,
++				       bfd *abfd,
++				       elf_property *aprop,
++				       elf_property *bprop)
++{
++  uint32_t prop
++    = elf_aarch64_tdata (info->output_bfd)->gnu_and_prop;
++  return  _bfd_aarch64_elf_merge_gnu_properties (info, abfd, aprop,
++						 bprop, prop);
++}
+ 
+ /* We use this so we can override certain functions
+    (though currently we don't).  */
+@@ -9453,6 +9482,12 @@ const struct elf_size_info elfNN_aarch64
+ #define elf_backend_symbol_processing		\
+   elfNN_aarch64_backend_symbol_processing
+ 
++#define elf_backend_setup_gnu_properties	\
++  elfNN_aarch64_link_setup_gnu_properties
++
++#define elf_backend_merge_gnu_properties	\
++  elfNN_aarch64_merge_gnu_properties
++
+ #define elf_backend_can_refcount       1
+ #define elf_backend_can_gc_sections    1
+ #define elf_backend_plt_readonly       1
+diff -rup binutils.orig/bfd/elfxx-aarch64.c binutils-2.30/bfd/elfxx-aarch64.c
+--- binutils.orig/bfd/elfxx-aarch64.c	2020-11-04 14:53:52.138476401 +0000
++++ binutils-2.30/bfd/elfxx-aarch64.c	2020-11-04 14:56:42.276422492 +0000
+@@ -660,3 +660,183 @@ _bfd_aarch64_elf_write_core_note (bfd *a
+       }
+     }
+ }
++
++/* Find the first input bfd with GNU property and merge it with GPROP.  If no
++   such input is found, add it to a new section at the last input.  Update
++   GPROP accordingly.  */
++bfd *
++_bfd_aarch64_elf_link_setup_gnu_properties (struct bfd_link_info *info,
++					    uint32_t *gprop)
++{
++  asection *sec;
++  bfd *pbfd;
++  bfd *ebfd = NULL;
++  elf_property *prop;
++
++  uint32_t gnu_prop = *gprop;
++
++  /* Find a normal input file with GNU property note.  */
++  for (pbfd = info->input_bfds;
++       pbfd != NULL;
++       pbfd = pbfd->link.next)
++    if (bfd_get_flavour (pbfd) == bfd_target_elf_flavour
++	&& bfd_count_sections (pbfd) != 0)
++      {
++	ebfd = pbfd;
++
++	if (elf_properties (pbfd) != NULL)
++	  break;
++      }
++
++  /* If ebfd != NULL it is either an input with property note or the last
++     input.  Either way if we have gnu_prop, we should add it (by creating
++     a section if needed).  */
++  if (ebfd != NULL && gnu_prop)
++    {
++      prop = _bfd_elf_get_property (ebfd,
++				    GNU_PROPERTY_AARCH64_FEATURE_1_AND,
++				    4);
++      prop->u.number |= gnu_prop;
++      prop->pr_kind = property_number;
++
++      /* pbfd being NULL implies ebfd is the last input.  Create the GNU
++	 property note section.  */
++      if (pbfd == NULL)
++	{
++	  sec = bfd_make_section_with_flags (ebfd,
++					     NOTE_GNU_PROPERTY_SECTION_NAME,
++					     (SEC_ALLOC
++					      | SEC_LOAD
++					      | SEC_IN_MEMORY
++					      | SEC_READONLY
++					      | SEC_HAS_CONTENTS
++					      | SEC_DATA));
++	  if (sec == NULL)
++	    info->callbacks->einfo (
++	      _("%F%P: failed to create GNU property section\n"));
++
++	  elf_section_type (sec) = SHT_NOTE;
++	}
++    }
++
++  pbfd = _bfd_elf_link_setup_gnu_properties (info);
++
++  if (bfd_link_relocatable (info))
++    return pbfd;
++
++  /* If pbfd has any GNU_PROPERTY_AARCH64_FEATURE_1_AND properties, update
++     gnu_prop accordingly.  */
++  if (pbfd != NULL)
++    {
++      elf_property_list *p;
++
++      /* The property list is sorted in order of type.  */
++      for (p = elf_properties (pbfd); p; p = p->next)
++	{
++	  /* Check for all GNU_PROPERTY_AARCH64_FEATURE_1_AND.  */
++	  if (GNU_PROPERTY_AARCH64_FEATURE_1_AND == p->property.pr_type)
++	    {
++	      gnu_prop = (p->property.u.number
++			  & (GNU_PROPERTY_AARCH64_FEATURE_1_PAC
++			      | GNU_PROPERTY_AARCH64_FEATURE_1_BTI));
++	      break;
++	    }
++	  else if (GNU_PROPERTY_AARCH64_FEATURE_1_AND < p->property.pr_type)
++	    break;
++	}
++    }
++  *gprop = gnu_prop;
++  return pbfd;
++}
++
++/* Define elf_backend_parse_gnu_properties for AArch64.  */
++enum elf_property_kind
++_bfd_aarch64_elf_parse_gnu_properties (bfd *abfd, unsigned int type,
++				       bfd_byte *ptr, unsigned int datasz)
++{
++  elf_property *prop;
++
++  switch (type)
++    {
++    case GNU_PROPERTY_AARCH64_FEATURE_1_AND:
++      if (datasz != 4)
++	{
++	  _bfd_error_handler
++	    ( _("error: %pB: <corrupt AArch64 used size: 0x%x>"),
++	     abfd, datasz);
++	  return property_corrupt;
++	}
++      prop = _bfd_elf_get_property (abfd, type, datasz);
++      /* Combine properties of the same type.  */
++      prop->u.number |= bfd_h_get_32 (abfd, ptr);
++      prop->pr_kind = property_number;
++      break;
++
++    default:
++      return property_ignored;
++    }
++
++  return property_number;
++}
++
++/* Merge AArch64 GNU property BPROP with APROP also accounting for PROP.
++   If APROP isn't NULL, merge it with BPROP and/or PROP.  Vice-versa if BROP
++   isn't NULL.  Return TRUE if there is any update to APROP or if BPROP should
++   be merge with ABFD.  */
++bfd_boolean
++_bfd_aarch64_elf_merge_gnu_properties (struct bfd_link_info *info
++				       ATTRIBUTE_UNUSED,
++				       bfd *abfd ATTRIBUTE_UNUSED,
++				       elf_property *aprop,
++				       elf_property *bprop,
++				       uint32_t prop)
++{
++  unsigned int orig_number;
++  bfd_boolean updated = FALSE;
++  unsigned int pr_type = aprop != NULL ? aprop->pr_type : bprop->pr_type;
++
++  switch (pr_type)
++    {
++    case GNU_PROPERTY_AARCH64_FEATURE_1_AND:
++      {
++	if (aprop != NULL && bprop != NULL)
++	  {
++	    orig_number = aprop->u.number;
++	    aprop->u.number = (orig_number & bprop->u.number) | prop;
++	    updated = orig_number != aprop->u.number;
++	    /* Remove the property if all feature bits are cleared.  */
++	    if (aprop->u.number == 0)
++	      aprop->pr_kind = property_remove;
++	    break;
++	  }
++	/* If either is NULL, the AND would be 0 so, if there is
++	   any PROP, asign it to the input that is not NULL.  */
++	if (prop)
++	  {
++	    if (aprop != NULL)
++	      {
++		orig_number = aprop->u.number;
++		aprop->u.number = prop;
++		updated = orig_number != aprop->u.number;
++	      }
++	    else
++	      {
++		bprop->u.number = prop;
++		updated = TRUE;
++	      }
++	  }
++	/* No PROP and BPROP is NULL, so remove APROP.  */
++	else if (aprop != NULL)
++	  {
++	    aprop->pr_kind = property_remove;
++	    updated = TRUE;
++	  }
++      }
++      break;
++
++    default:
++      abort ();
++    }
++
++  return updated;
++}
+diff -rup binutils.orig/bfd/elfxx-aarch64.h binutils-2.30/bfd/elfxx-aarch64.h
+--- binutils.orig/bfd/elfxx-aarch64.h	2020-11-04 14:53:52.134476424 +0000
++++ binutils-2.30/bfd/elfxx-aarch64.h	2020-11-04 14:56:42.276422492 +0000
+@@ -65,3 +65,19 @@ _bfd_aarch64_elf_write_core_note (bfd *,
+ #define elf_backend_grok_prstatus	_bfd_aarch64_elf_grok_prstatus
+ #define elf_backend_grok_psinfo		_bfd_aarch64_elf_grok_psinfo
+ #define elf_backend_write_core_note	_bfd_aarch64_elf_write_core_note
++
++extern bfd *
++_bfd_aarch64_elf_link_setup_gnu_properties (struct bfd_link_info *,
++					    uint32_t *);
++
++extern enum elf_property_kind
++_bfd_aarch64_elf_parse_gnu_properties (bfd *, unsigned int,
++				       bfd_byte *, unsigned int);
++
++extern bfd_boolean
++_bfd_aarch64_elf_merge_gnu_properties (struct bfd_link_info *, bfd *,
++				       elf_property *, elf_property *,
++				       uint32_t);
++
++#define elf_backend_parse_gnu_properties	\
++  _bfd_aarch64_elf_parse_gnu_properties
+diff -rup binutils.orig/binutils/readelf.c binutils-2.30/binutils/readelf.c
+--- binutils.orig/binutils/readelf.c	2020-11-04 14:53:51.723478764 +0000
++++ binutils-2.30/binutils/readelf.c	2020-11-04 14:56:42.277422485 +0000
+@@ -17103,6 +17103,33 @@ decode_x86_feature_2 (unsigned int bitma
+ }
+ 
+ static void
++decode_aarch64_feature_1_and (unsigned int bitmask)
++{
++  while (bitmask)
++    {
++      unsigned int bit = bitmask & (- bitmask);
++
++      bitmask &= ~ bit;
++      switch (bit)
++	{
++	case GNU_PROPERTY_AARCH64_FEATURE_1_BTI:
++	  printf ("BTI");
++	  break;
++
++	case GNU_PROPERTY_AARCH64_FEATURE_1_PAC:
++	  printf ("PAC");
++	  break;
++
++	default:
++	  printf (_("<unknown: %x>"), bit);
++	  break;
++	}
++      if (bitmask)
++	printf (", ");
++    }
++}
++
++static void
+ print_gnu_property_note (Filedata * filedata, Elf_Internal_Note * pnote)
+ {
+   unsigned char * ptr = (unsigned char *) pnote->descdata;
+@@ -17236,6 +17263,18 @@ print_gnu_property_note (Filedata * file
+ 		  break;
+ 		}
+ 	    }
++	  else if (filedata->file_header.e_machine == EM_AARCH64)
++	    {
++	      if (type == GNU_PROPERTY_AARCH64_FEATURE_1_AND)
++		{
++		  printf ("AArch64 feature: ");
++		  if (datasz != 4)
++		    printf (_("<corrupt length: %#x> "), datasz);
++		  else
++		    decode_aarch64_feature_1_and (byte_get (ptr, 4));
++		  goto next;
++		}
++	    }
+ 	}
+       else
+ 	{
+diff -rup binutils.orig/include/elf/common.h binutils-2.30/include/elf/common.h
+--- binutils.orig/include/elf/common.h	2020-11-04 14:53:52.155476304 +0000
++++ binutils-2.30/include/elf/common.h	2020-11-04 14:56:42.277422485 +0000
+@@ -832,6 +832,12 @@
+ #define GNU_PROPERTY_X86_FEATURE_2_XSAVEOPT	(1U << 8)
+ #define GNU_PROPERTY_X86_FEATURE_2_XSAVEC	(1U << 9)
+ 
++/* AArch64 specific GNU PROPERTY.  */
++#define GNU_PROPERTY_AARCH64_FEATURE_1_AND	0xc0000000
++
++#define GNU_PROPERTY_AARCH64_FEATURE_1_BTI	(1U << 0)
++#define GNU_PROPERTY_AARCH64_FEATURE_1_PAC	(1U << 1)
++
+ /* Values used in GNU .note.ABI-tag notes (NT_GNU_ABI_TAG).  */
+ #define GNU_ABI_TAG_LINUX	0
+ #define GNU_ABI_TAG_HURD	1
+diff -rup binutils.orig/ld/testsuite/ld-aarch64/aarch64-elf.exp binutils-2.30/ld/testsuite/ld-aarch64/aarch64-elf.exp
+--- binutils.orig/ld/testsuite/ld-aarch64/aarch64-elf.exp	2020-11-04 14:53:51.843478081 +0000
++++ binutils-2.30/ld/testsuite/ld-aarch64/aarch64-elf.exp	2020-11-04 14:56:42.278422479 +0000
+@@ -337,6 +337,10 @@ run_dump_test_lp64 "variant_pcs-r"
+ run_dump_test_lp64 "variant_pcs-shared"
+ run_dump_test_lp64 "variant_pcs-now"
+ 
++run_dump_test "property-bti-pac1"
++run_dump_test "property-bti-pac2"
++run_dump_test "property-bti-pac3"
++
+ set aarch64elflinktests {
+   {"ld-aarch64/so with global symbol" "-shared" "" "" {copy-reloc-so.s}
+     {} "copy-reloc-so.so"}
+--- /dev/null	2020-11-04 08:04:13.849482156 +0000
++++ binutils-2.30/ld/testsuite/ld-aarch64/property-bti-pac1.d	2020-11-04 14:56:42.278422479 +0000
+@@ -0,0 +1,11 @@
++#name: GNU Property (single input, combine section)
++#source: property-bti-pac1.s
++#as: -march=armv8.5-a -defsym __mult__=0
++#ld: -shared
++#readelf: -n
++#target: *linux*
++
++Displaying notes found in: .note.gnu.property
++  Owner                 Data size	Description
++  GNU                  0x00000010	NT_GNU_PROPERTY_TYPE_0
++      Properties: AArch64 feature: BTI, PAC
+--- /dev/null	2020-11-04 08:04:13.849482156 +0000
++++ binutils-2.30/ld/testsuite/ld-aarch64/property-bti-pac1.s	2020-11-04 14:56:42.278422479 +0000
+@@ -0,0 +1,37 @@
++	.text
++	.globl _start
++	.type _start,@function
++_start:
++	mov x1, #2
++.ifndef __mult__
++	bl foo
++.endif
++	.section ".note.gnu.property", "a"
++	.p2align 3
++	.long 1f - 0f		/* name length */
++	.long 5f - 2f		/* data length */
++	.long 5			/* note type */
++0:	.asciz "GNU"		/* vendor name */
++1:
++	.p2align 3
++2:	.long 0xc0000000	/* pr_type.  */
++	.long 4f - 3f		/* pr_datasz.  */
++3:
++	.long 0x2		/* PAC.  */
++4:
++	.p2align 3
++5:
++	.p2align 3
++	.long 1f - 0f		/* name length */
++	.long 5f - 2f		/* data length */
++	.long 5			/* note type */
++0:	.asciz "GNU"		/* vendor name */
++1:
++	.p2align 3
++2:	.long 0xc0000000	/* pr_type.  */
++	.long 4f - 3f		/* pr_datasz.  */
++3:
++	.long 0x1		/* BTI.  */
++4:
++	.p2align 3
++5:
+--- /dev/null	2020-11-04 08:04:13.849482156 +0000
++++ binutils-2.30/ld/testsuite/ld-aarch64/property-bti-pac2.s	2020-11-04 14:56:42.278422479 +0000
+@@ -0,0 +1,50 @@
++	.text
++	.global	foo
++	.type	foo, %function
++foo:
++	sub	sp, sp, #16
++	mov	w0, 9
++	str	w0, [sp, 12]
++	ldr	w0, [sp, 12]
++	add	w0, w0, 4
++	str	w0, [sp, 12]
++	nop
++	add	sp, sp, 16
++	ret
++	.size	foo, .-foo
++	.global	bar
++	.type	bar, %function
++.ifdef __property_bti__
++	.section ".note.gnu.property", "a"
++	.p2align 3
++	.long 1f - 0f		/* name length */
++	.long 5f - 2f		/* data length */
++	.long 5			/* note type */
++0:	.asciz "GNU"		/* vendor name */
++1:
++	.p2align 3
++2:	.long 0xc0000000	/* pr_type.  */
++	.long 4f - 3f		/* pr_datasz.  */
++3:
++	.long 0x1		/* BTI.  */
++4:
++	.p2align 3
++5:
++.endif
++.ifdef __property_pac__
++	.section ".note.gnu.property", "a"
++	.p2align 3
++	.long 1f - 0f		/* name length */
++	.long 5f - 2f		/* data length */
++	.long 5			/* note type */
++0:	.asciz "GNU"		/* vendor name */
++1:
++	.p2align 3
++2:	.long 0xc0000000	/* pr_type.  */
++	.long 4f - 3f		/* pr_datasz.  */
++3:
++	.long 0x2		/* PAC.  */
++4:
++	.p2align 3
++5:
++.endif
+--- /dev/null	2020-11-04 08:04:13.849482156 +0000
++++ binutils-2.30/ld/testsuite/ld-aarch64/property-bti-pac2.d	2020-11-04 14:56:42.278422479 +0000
+@@ -0,0 +1,12 @@
++#name: GNU Property (combine multiple with BTI)
++#source: property-bti-pac1.s
++#source: property-bti-pac2.s
++#as: -mabi=lp64 -defsym __property_bti__=1
++#ld: -e _start
++#readelf: -n
++#target: *linux*
++
++Displaying notes found in: .note.gnu.property
++  Owner                 Data size	Description
++  GNU                  0x00000010	NT_GNU_PROPERTY_TYPE_0
++      Properties: AArch64 feature: BTI
+--- /dev/null	2020-11-04 08:04:13.849482156 +0000
++++ binutils-2.30/ld/testsuite/ld-aarch64/property-bti-pac3.d	2020-11-04 14:56:42.278422479 +0000
+@@ -0,0 +1,12 @@
++#name: GNU Property (combine multiple with PAC)
++#source: property-bti-pac1.s
++#source: property-bti-pac2.s
++#as: -mabi=lp64 -defsym __property_pac__=1
++#ld: -e _start
++#readelf: -n
++#target: *linux*
++
++Displaying notes found in: .note.gnu.property
++  Owner                 Data size	Description
++  GNU                  0x00000010	NT_GNU_PROPERTY_TYPE_0
++      Properties: AArch64 feature: PAC
+diff -rup binutils.orig/bfd/elfnn-aarch64.c binutils-2.30/bfd/elfnn-aarch64.c
+--- binutils.orig/bfd/elfnn-aarch64.c	2020-11-25 11:53:26.648275978 +0000
++++ binutils-2.30/bfd/elfnn-aarch64.c	2020-11-25 12:21:39.276864970 +0000
+@@ -9331,12 +9331,14 @@ elfNN_aarch64_link_setup_gnu_properties
+    for the effect of GNU properties of the output_bfd.  */
+ static bfd_boolean
+ elfNN_aarch64_merge_gnu_properties (struct bfd_link_info *info,
+-				       bfd *abfd,
+-				       elf_property *aprop,
+-				       elf_property *bprop)
++				    bfd *abfd,
++				    bfd *bbfd ATTRIBUTE_UNUSED,
++				    elf_property *aprop,
++				    elf_property *bprop)
+ {
+   uint32_t prop
+     = elf_aarch64_tdata (info->output_bfd)->gnu_and_prop;
++
+   return  _bfd_aarch64_elf_merge_gnu_properties (info, abfd, aprop,
+ 						 bprop, prop);
+ }
+diff -rup binutils.orig/bfd/elfxx-aarch64.c binutils-2.30/bfd/elfxx-aarch64.c
+--- binutils.orig/bfd/elfxx-aarch64.c	2020-11-25 11:53:26.655275930 +0000
++++ binutils-2.30/bfd/elfxx-aarch64.c	2020-11-25 12:21:34.689895875 +0000
+@@ -22,6 +22,7 @@
+ #include "elfxx-aarch64.h"
+ #include <stdarg.h>
+ #include <string.h>
++#include "libbfd.h"
+ 
+ #define MASK(n) ((1u << (n)) - 1)
+ 
+@@ -835,7 +836,10 @@ _bfd_aarch64_elf_merge_gnu_properties (s
+       break;
+ 
+     default:
+-      abort ();
++      _bfd_error_handler
++	( _("error: %pB: <corrupt AArch64 property note: 0x%x>"),
++	  abfd, pr_type);
++      return FALSE;
+     }
+ 
+   return updated;
+diff -rup binutils.orig/ld/testsuite/ld-aarch64/property-bti-pac1.d binutils-2.30/ld/testsuite/ld-aarch64/property-bti-pac1.d
+--- binutils.orig/ld/testsuite/ld-aarch64/property-bti-pac1.d	2020-11-25 11:53:26.344278044 +0000
++++ binutils-2.30/ld/testsuite/ld-aarch64/property-bti-pac1.d	2020-11-25 11:57:53.179471900 +0000
+@@ -1,6 +1,6 @@
+ #name: GNU Property (single input, combine section)
+ #source: property-bti-pac1.s
+-#as: -march=armv8.5-a -defsym __mult__=0
++#as: -defsym __mult__=0
+ #ld: -shared
+ #readelf: -n
+ #target: *linux*

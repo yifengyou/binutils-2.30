@@ -1,0 +1,116 @@
+--- binutils.orig/gas/config/tc-i386.c	2020-08-21 10:21:00.595678097 +0100
++++ binutils-2.30/gas/config/tc-i386.c	2020-08-21 10:22:15.009449340 +0100
+@@ -8035,7 +8035,8 @@ output_disp (fragS *insn_start_frag, off
+ 	      int size = disp_size (n);
+ 	      offsetT val = i.op[n].disps->X_add_number;
+ 
+-	      val = offset_in_range (val >> i.memshift, size);
++	      val = offset_in_range (val >> (size == 1 ? i.memshift : 0),
++				     size);
+ 	      p = frag_more (size);
+ 	      md_number_to_chars (p, val, size);
+ 	    }
+--- binutils.orig/gas/testsuite/gas/i386/i386.exp	2020-08-21 10:21:00.669677873 +0100
++++ binutils-2.30/gas/testsuite/gas/i386/i386.exp	2020-08-21 10:39:22.921167674 +0100
+@@ -216,6 +216,7 @@ if [expr ([istarget "i*86-*-*"] ||  [ist
+     run_dump_test "evex-lig512-intel"
+     run_dump_test "evex-wig1"
+     run_dump_test "evex-wig1-intel"
++    run_dump_test "evex-no-scale-32"
+     run_dump_test "sse2avx"
+     run_list_test "inval-avx" "-al"
+     run_list_test "inval-avx512f" "-al"
+@@ -692,6 +693,7 @@ if [expr ([istarget "i*86-*-*"] || [ista
+     run_dump_test "x86-64-avx256int-intel"
+     run_dump_test "x86-64-avx2"
+     run_dump_test "x86-64-avx2-intel"
++    run_dump_test "evex-no-scale-64"
+     run_dump_test "x86-64-avx-gather"
+     run_dump_test "x86-64-avx-gather-intel"
+     run_dump_test "x86-64-avx512f"
+--- /dev/null	2020-08-21 07:54:54.335936348 +0100
++++ binutils-2.30/gas/testsuite/gas/i386/evex-no-scale.s	2020-08-21 10:41:30.411757740 +0100
+@@ -0,0 +1,18 @@
++	.allow_index_reg
++	.struct
++	inc	%eax
++.equiv is_64bit, . > 1
++
++	.text
++disp:
++.if is_64bit
++	vmovaps	-1024(%rip), %zmm0
++	vmovaps	64(,%rax), %zmm0
++	vmovaps	64(,%riz), %zmm0
++.endif
++	vmovaps	64(,%eax), %zmm0
++	vmovaps	64(,%eiz), %zmm0
++	vmovaps	64, %zmm0
++.if !is_64bit
++	addr16 vmovaps 64, %zmm0
++.endif
+--- /dev/null	2020-08-21 07:54:54.335936348 +0100
++++ binutils-2.30/gas/testsuite/gas/i386/evex-no-scale-32.d	2020-08-21 10:41:37.347735430 +0100
+@@ -0,0 +1,14 @@
++#source: evex-no-scale.s
++#objdump: -dw
++#name: ix86 EVEX no disp scaling
++
++.*: +file format .*
++
++Disassembly of section .text:
++
++0+ <disp>:
++ +[a-f0-9]+:	62 f1 7c 48 28 04 05 40 00 00 00 	vmovaps 0x40\(,%eax,1\),%zmm0
++ +[a-f0-9]+:	62 f1 7c 48 28 04 25 40 00 00 00 	vmovaps 0x40\(,%eiz,1\),%zmm0
++ +[a-f0-9]+:	62 f1 7c 48 28 05 40 00 00 00 	vmovaps 0x40,%zmm0
++ +[a-f0-9]+:	67 62 f1 7c 48 28 06 40 00 	vmovaps 0x40,%zmm0
++#pass
+--- /dev/null	2020-08-21 07:54:54.335936348 +0100
++++ binutils-2.30/gas/testsuite/gas/i386/evex-no-scale-64.d	2020-08-21 10:41:42.539718727 +0100
+@@ -0,0 +1,16 @@
++#source: evex-no-scale.s
++#objdump: -dw
++#name: x86-64 EVEX no disp scaling
++
++.*: +file format .*
++
++Disassembly of section .text:
++
++0+ <disp>:
++ +[a-f0-9]+:	62 f1 7c 48 28 05 00 fc ff ff 	vmovaps -0x400\(%rip\),%zmm0        # .*
++ +[a-f0-9]+:	62 f1 7c 48 28 04 05 40 00 00 00 	vmovaps 0x40\(,%rax,1\),%zmm0
++ +[a-f0-9]+:	62 f1 7c 48 28 04 25 40 00 00 00 	vmovaps 0x40,%zmm0
++ +[a-f0-9]+:	67 62 f1 7c 48 28 04 05 40 00 00 00 	vmovaps 0x40\(,%eax,1\),%zmm0
++ +[a-f0-9]+:	67 62 f1 7c 48 28 04 25 40 00 00 00 	vmovaps 0x40\(,%eiz,1\),%zmm0
++ +[a-f0-9]+:	62 f1 7c 48 28 04 25 40 00 00 00 	vmovaps 0x40,%zmm0
++#pass
+--- binutils.orig/gas/testsuite/gas/i386/evex-no-scale.s	2020-08-21 12:48:57.859030235 +0100
++++ binutils-2.30/gas/testsuite/gas/i386/evex-no-scale.s	2020-08-21 12:53:26.631149341 +0100
+@@ -5,7 +5,7 @@
+ 
+ 	.text
+ disp:
+-.if is_64bit
++.ifdef x86_64
+ 	vmovaps	-1024(%rip), %zmm0
+ 	vmovaps	64(,%rax), %zmm0
+ 	vmovaps	64(,%riz), %zmm0
+@@ -13,6 +13,6 @@ disp:
+ 	vmovaps	64(,%eax), %zmm0
+ 	vmovaps	64(,%eiz), %zmm0
+ 	vmovaps	64, %zmm0
+-.if !is_64bit
++.ifndef x86_64
+ 	addr16 vmovaps 64, %zmm0
+ .endif
+--- binutils.orig/gas/testsuite/gas/i386/evex-no-scale-64.d	2020-08-21 12:48:57.860030232 +0100
++++ binutils-2.30/gas/testsuite/gas/i386/evex-no-scale-64.d	2020-08-21 13:20:59.174525430 +0100
+@@ -11,6 +11,6 @@ Disassembly of section .text:
+  +[a-f0-9]+:	62 f1 7c 48 28 04 05 40 00 00 00 	vmovaps 0x40\(,%rax,1\),%zmm0
+  +[a-f0-9]+:	62 f1 7c 48 28 04 25 40 00 00 00 	vmovaps 0x40,%zmm0
+  +[a-f0-9]+:	67 62 f1 7c 48 28 04 05 40 00 00 00 	vmovaps 0x40\(,%eax,1\),%zmm0
+- +[a-f0-9]+:	67 62 f1 7c 48 28 04 25 40 00 00 00 	vmovaps 0x40\(,%eiz,1\),%zmm0
++ +[a-f0-9]+:	67 62 f1 7c 48 28 04 25 40 00 00 00 	addr32 vmovaps 0x40,%zmm0
+  +[a-f0-9]+:	62 f1 7c 48 28 04 25 40 00 00 00 	vmovaps 0x40,%zmm0
+ #pass

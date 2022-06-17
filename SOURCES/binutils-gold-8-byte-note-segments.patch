@@ -1,0 +1,99 @@
+diff -rup binutils.orig/gold/layout.cc binutils-2.30/gold/layout.cc
+--- binutils.orig/gold/layout.cc	2018-10-09 15:24:05.987282736 +0100
++++ binutils-2.30/gold/layout.cc	2018-10-09 16:08:29.445946736 +0100
+@@ -2052,12 +2052,15 @@ Layout::attach_allocated_section_to_segm
+   // segment.
+   if (os->type() == elfcpp::SHT_NOTE)
+     {
++      uint64_t os_align = os->addralign();
++
+       // See if we already have an equivalent PT_NOTE segment.
+       for (p = this->segment_list_.begin();
+ 	   p != segment_list_.end();
+ 	   ++p)
+ 	{
+ 	  if ((*p)->type() == elfcpp::PT_NOTE
++	      && (*p)->align() == os_align
+ 	      && (((*p)->flags() & elfcpp::PF_W)
+ 		  == (seg_flags & elfcpp::PF_W)))
+ 	    {
+@@ -2071,6 +2074,7 @@ Layout::attach_allocated_section_to_segm
+ 	  Output_segment* oseg = this->make_output_segment(elfcpp::PT_NOTE,
+ 							   seg_flags);
+ 	  oseg->add_output_section_to_nonload(os, seg_flags);
++	  oseg->set_align(os_align);
+ 	}
+     }
+ 
+@@ -3171,6 +3175,10 @@ Layout::create_note(const char* name, in
+ #else
+   const int size = 32;
+ #endif
++  // The NT_GNU_PROPERTY_TYPE_0 note conforms to gABI.
++  const int addralign = ((note_type == elfcpp::NT_GNU_PROPERTY_TYPE_0
++			 ? parameters->target().get_size()
++			 : size) / 8);
+ 
+   // The contents of the .note section.
+   size_t namesz = strlen(name) + 1;
+@@ -3234,7 +3242,7 @@ Layout::create_note(const char* name, in
+     return NULL;
+ 
+   Output_section_data* posd = new Output_data_const_buffer(buffer, notehdrsz,
+-							   size / 8,
++							   addralign,
+ 							   "** note header");
+   os->add_output_section_data(posd);
+ 
+@@ -3692,6 +3700,11 @@ Layout::segment_precedes(const Output_se
+     {
+       if (type1 != type2)
+ 	return type1 < type2;
++      uint64_t align1 = seg1->align();
++      uint64_t align2 = seg2->align();
++      // Place segments with larger alignments first.
++      if (align1 != align2)
++	return align1 > align2;
+       gold_assert(flags1 != flags2
+ 		  || this->script_options_->saw_phdrs_clause());
+       return flags1 < flags2;
+diff -rup binutils.orig/gold/output.cc binutils-2.30/gold/output.cc
+--- binutils.orig/gold/output.cc	2018-10-09 15:24:05.986282744 +0100
++++ binutils-2.30/gold/output.cc	2018-10-09 16:09:03.749670846 +0100
+@@ -4107,6 +4107,7 @@ Output_segment::Output_segment(elfcpp::E
+   : vaddr_(0),
+     paddr_(0),
+     memsz_(0),
++    align_(0),
+     max_align_(0),
+     min_p_align_(0),
+     offset_(0),
+diff -rup binutils.orig/gold/output.h binutils-2.30/gold/output.h
+--- binutils.orig/gold/output.h	2018-10-09 15:24:05.984282760 +0100
++++ binutils-2.30/gold/output.h	2018-10-09 16:09:45.665333727 +0100
+@@ -4676,6 +4676,16 @@ class Output_segment
+   offset() const
+   { return this->offset_; }
+ 
++  // Return the segment alignment.
++  uint64_t
++  align() const
++  { return this->align_; }
++
++  // Set the segment alignment.
++  void
++  set_align(uint64_t align)
++  { this->align_ = align; }
++
+   // Whether this is a segment created to hold large data sections.
+   bool
+   is_large_data_segment() const
+@@ -4898,6 +4908,8 @@ class Output_segment
+   uint64_t paddr_;
+   // The size of the segment in memory.
+   uint64_t memsz_;
++  // The segment alignment.
++  uint64_t align_;
+   // The maximum section alignment.  The is_max_align_known_ field
+   // indicates whether this has been finalized.
+   uint64_t max_align_;

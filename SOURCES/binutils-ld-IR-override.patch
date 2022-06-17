@@ -1,0 +1,251 @@
+diff -rup binutils.orig/include/bfdlink.h binutils-2.30/include/bfdlink.h
+--- binutils.orig/include/bfdlink.h	2020-11-02 10:04:27.457826514 +0000
++++ binutils-2.30/include/bfdlink.h	2020-11-02 10:05:14.723537971 +0000
+@@ -339,6 +339,9 @@ struct bfd_link_info
+   /* TRUE if the LTO plugin is active.  */
+   unsigned int lto_plugin_active: 1;
+ 
++  /* TRUE if all LTO IR symbols have been read.  */
++  unsigned int lto_all_symbols_read : 1;
++
+   /* TRUE if global symbols in discarded sections should be stripped.  */
+   unsigned int strip_discarded: 1;
+ 
+diff -rup binutils.orig/ld/ldlang.c binutils-2.30/ld/ldlang.c
+--- binutils.orig/ld/ldlang.c	2020-11-02 10:04:16.852890551 +0000
++++ binutils-2.30/ld/ldlang.c	2020-11-02 10:06:12.285185841 +0000
+@@ -7162,6 +7162,7 @@ lang_process (void)
+       if (plugin_call_all_symbols_read ())
+ 	einfo (_("%P%F: %s: plugin reported error after all symbols read\n"),
+ 	       plugin_error_plugin ());
++      link_info.lto_all_symbols_read = TRUE;
+       /* Open any newly added files, updating the file chains.  */
+       open_input_bfds (*added.tail, OPEN_BFD_NORMAL);
+       /* Restore the global list pointer now they have all been added.  */
+diff -rup binutils.orig/ld/plugin.c binutils-2.30/ld/plugin.c
+--- binutils.orig/ld/plugin.c	2020-11-02 10:04:16.852890551 +0000
++++ binutils-2.30/ld/plugin.c	2020-11-02 10:08:11.010459546 +0000
+@@ -1355,12 +1355,16 @@ plugin_notice (struct bfd_link_info *inf
+ 	     new value from a real BFD.  Weak symbols are not normally
+ 	     overridden by a new weak definition, and strong symbols
+ 	     will normally cause multiple definition errors.  Avoid
+-	     this by making the symbol appear to be undefined.  */
+-	  if (((h->type == bfd_link_hash_defweak
+-		|| h->type == bfd_link_hash_defined)
+-	       && is_ir_dummy_bfd (sym_bfd = h->u.def.section->owner))
+-	      || (h->type == bfd_link_hash_common
+-		  && is_ir_dummy_bfd (sym_bfd = h->u.c.p->section->owner)))
++	     this by making the symbol appear to be undefined.
++
++	     NB: We change the previous definition in the IR object to
++	     undefweak only after all LTO symbols have been read.  */
++	  if (info->lto_all_symbols_read
++              && (((h->type == bfd_link_hash_defweak
++                    || h->type == bfd_link_hash_defined)
++                   && is_ir_dummy_bfd (sym_bfd = h->u.def.section->owner))
++                  || (h->type == bfd_link_hash_common
++                      && is_ir_dummy_bfd (sym_bfd = h->u.c.p->section->owner))))
+ 	    {
+ 	      h->type = bfd_link_hash_undefweak;
+ 	      h->u.undef.abfd = sym_bfd;
+diff -rup binutils.orig/ld/testsuite/ld-plugin/lto.exp binutils-2.30/ld/testsuite/ld-plugin/lto.exp
+--- binutils.orig/ld/testsuite/ld-plugin/lto.exp	2020-11-02 10:04:16.926890104 +0000
++++ binutils-2.30/ld/testsuite/ld-plugin/lto.exp	2020-11-02 10:12:09.551000288 +0000
+@@ -214,6 +214,36 @@ set lto_link_tests [list \
+   [list "Build pr22502b.o" \
+    "$plug_opt" "-flto $lto_no_fat" \
+    {pr22502b.c}] \
++  [list "Build pr26262b.o" \
++   "" "-O2" \
++   {pr26262b.c} {} "" "c"] \
++  [list "Build pr26262c.o" \
++   "" "-O2" \
++   {pr26262c.c} {} "" "c"] \
++  [list "Build pr26267a.o" \
++   "" "-O2 -flto $lto_no_fat" \
++   {pr26267a.c} {} "" "c"] \
++  [list "Build pr26267b.o" \
++   "" "-O2" \
++   {pr26267b.c} {} "" "c"] \
++  [list "Build pr26267c.o" \
++   "" "-O2" \
++   {pr26267c.c} {} "" "c"] \
++  [list "Build pr26267a" \
++   "" "-O2" \
++   {pr26267a.c} {} "" "c"] \
++  [list "Build pr26267a" \
++   "-flto tmpdir/pr26267a.o tmpdir/pr26267b.o tmpdir/pr26267c.o" \
++   "-flto $lto_no_fat" \
++   {dummy.c} \
++   {{error_output "pr26267.err"}} \
++   "pr26267a"] \
++  [list "Build pr26267b" \
++   "-flto tmpdir/pr26267b.o tmpdir/pr26267c.o tmpdir/pr26267a.o" \
++   "-flto $lto_no_fat" \
++   {dummy.c} \
++   {{error_output "pr26267.err"}} \
++   "pr26267b"] \
+ ]
+ 
+ if { [at_least_gcc_version 4 7] } {
+@@ -373,6 +403,16 @@ set lto_run_tests [list \
+   [list "Run pr22502" \
+    "-O2 -flto tmpdir/pr22502a.o tmpdir/pr22502b.o" "" \
+    {dummy.c} "pr20267" "pass.out" "-flto -O2" "c"] \
++  [list "Run pr26262a" \
++   "-O2 -flto" "" \
++   {pr26262a.c} "pr26262a" "pass.out" \
++   "-flto -O2" "c" "" \
++   "tmpdir/pr26262b.o tmpdir/pr26262c.o"] \
++  [list "Run pr26262b" \
++   "-flto -O2 tmpdir/pr26262b.o tmpdir/pr26262c.o" "" \
++   {pr26262a.c} "pr26262b" "pass.out" \
++   "-flto -O2" "c" "" \
++   ""] \
+ ]
+ 
+ if { [at_least_gcc_version 4 7] } {
+Only in binutils-2.30/ld/testsuite/ld-plugin: pr26262a.c
+Only in binutils-2.30/ld/testsuite/ld-plugin: pr26262b.c
+Only in binutils-2.30/ld/testsuite/ld-plugin: pr26267.err
+Only in binutils-2.30/ld/testsuite/ld-plugin: pr26267a.c
+Only in binutils-2.30/ld/testsuite/ld-plugin: pr26267b.c
+Only in binutils-2.30/ld/testsuite/ld-plugin: pr26267c.c
+--- /dev/null	2020-11-02 08:23:19.196542384 +0000
++++ binutils-2.30/ld/testsuite/ld-plugin/pr26262a.c	2020-11-02 10:13:16.624589913 +0000
+@@ -0,0 +1,21 @@
++#include <stdio.h>
++
++int counter;
++extern void foo (void);
++extern void xxx (void);
++
++void
++bar (void)
++{
++}
++
++int
++main(void)
++{
++  bar ();
++  foo ();
++  xxx ();
++  if (counter == 1)
++    printf ("PASS\n");
++  return 0;
++}
+--- /dev/null	2020-11-02 08:23:19.196542384 +0000
++++ binutils-2.30/ld/testsuite/ld-plugin/pr26262b.c	2020-11-02 10:13:27.358523487 +0000
+@@ -0,0 +1,16 @@
++#include <stdlib.h>
++
++extern int counter;
++
++void
++foo (void)
++{
++  counter++;
++}
++
++__attribute__((weak))
++void
++bar (void)
++{
++  abort ();
++}
+--- /dev/null	2020-11-02 08:23:19.196542384 +0000
++++ binutils-2.30/ld/testsuite/ld-plugin/pr26262c.c	2020-11-02 10:47:59.031665605 +0000
+@@ -0,0 +1,6 @@
++extern void bar (void);
++void
++xxx (void)
++{
++  bar ();
++}
+--- /dev/null	2020-11-02 08:23:19.196542384 +0000
++++ binutils-2.30/ld/testsuite/ld-plugin/pr26267c.c	2020-11-02 10:13:39.665447327 +0000
+@@ -0,0 +1,6 @@
++extern void bar (void);
++void
++xxx (void)
++{
++  bar ();
++}
+--- /dev/null	2020-11-02 08:23:19.196542384 +0000
++++ binutils-2.30/ld/testsuite/ld-plugin/pr26267b.c	2020-11-02 10:13:43.648422679 +0000
+@@ -0,0 +1,15 @@
++#include <stdlib.h>
++
++extern int counter;
++
++void
++foo (void)
++{
++  counter++;
++}
++
++void
++bar (void)
++{
++  abort ();
++}
+--- /dev/null	2020-11-02 08:23:19.196542384 +0000
++++ binutils-2.30/ld/testsuite/ld-plugin/pr26267a.c	2020-11-02 10:13:47.556398495 +0000
+@@ -0,0 +1,21 @@
++#include <stdio.h>
++
++int counter;
++extern void foo (void);
++extern void xxx (void);
++
++void
++bar (void)
++{
++}
++
++int
++main(void)
++{
++  bar ();
++  foo ();
++  xxx ();
++  if (counter == 1)
++    printf ("PASS\n");
++  return 0;
++}
+--- /dev/null	2020-11-02 08:23:19.196542384 +0000
++++ binutils-2.30/ld/testsuite/ld-plugin/pr26267.err	2020-11-02 10:14:01.785310441 +0000
+@@ -0,0 +1,3 @@
++#...
++.*: multiple definition of `bar'; .*
++#...
+diff -rup binutils.orig/ld/testsuite/ld-plugin/pr26267.err binutils-2.30/ld/testsuite/ld-plugin/pr26267.err
+--- binutils.orig/ld/testsuite/ld-plugin/pr26267.err	2020-11-02 12:51:28.751137533 +0000
++++ binutils-2.30/ld/testsuite/ld-plugin/pr26267.err	2020-11-02 13:01:38.430679516 +0000
+@@ -1,3 +1,3 @@
+ #...
+-.*: multiple definition of `bar'; .*
++.*: multiple definition of `bar'.*
+ #...
+--- binutils.orig/ld/testsuite/ld-plugin/lto.exp	2020-11-02 12:51:28.751137533 +0000
++++ binutils-2.30/ld/testsuite/ld-plugin/lto.exp	2020-11-02 13:10:49.531708566 +0000
+@@ -404,15 +404,13 @@ set lto_run_tests [list \
+    "-O2 -flto tmpdir/pr22502a.o tmpdir/pr22502b.o" "" \
+    {dummy.c} "pr20267" "pass.out" "-flto -O2" "c"] \
+   [list "Run pr26262a" \
+-   "-O2 -flto" "" \
++   "-O2 -flto tmpdir/pr26262b.o tmpdir/pr26262c.o" "" \
+    {pr26262a.c} "pr26262a" "pass.out" \
+-   "-flto -O2" "c" "" \
+-   "tmpdir/pr26262b.o tmpdir/pr26262c.o"] \
++   "-flto -O2" "c" "" ] \
+   [list "Run pr26262b" \
+    "-flto -O2 tmpdir/pr26262b.o tmpdir/pr26262c.o" "" \
+    {pr26262a.c} "pr26262b" "pass.out" \
+-   "-flto -O2" "c" "" \
+-   ""] \
++   "-flto -O2" "c" "" ] \
+ ]
+ 
+ if { [at_least_gcc_version 4 7] } {

@@ -1,0 +1,3810 @@
+diff -rup binutils.orig/bfd/elf-bfd.h binutils-2.30/bfd/elf-bfd.h
+--- binutils.orig/bfd/elf-bfd.h	2020-04-07 11:32:17.269776457 +0100
++++ binutils-2.30/bfd/elf-bfd.h	2020-04-07 13:34:03.897784103 +0100
+@@ -1467,12 +1467,16 @@ struct elf_backend_data
+ 						  unsigned int);
+ 
+   /* Merge GNU properties.  Return TRUE if property is updated.  */
+-  bfd_boolean (*merge_gnu_properties) (struct bfd_link_info *, bfd *,
++  bfd_boolean (*merge_gnu_properties) (struct bfd_link_info *, bfd *, bfd *,
+ 				       elf_property *, elf_property *);
+ 
+   /* Set up GNU properties.  */
+   bfd *(*setup_gnu_properties) (struct bfd_link_info *);
+ 
++  /* Fix up GNU properties.  */
++  void (*fixup_gnu_properties) (struct bfd_link_info *,
++				elf_property_list **);
++
+   /* Encoding used for compact EH tables.  */
+   int (*compact_eh_encoding) (struct bfd_link_info *);
+ 
+@@ -2673,6 +2677,10 @@ extern elf_property * _bfd_elf_get_prope
+   (bfd *, unsigned int, unsigned int);
+ extern bfd *_bfd_elf_link_setup_gnu_properties
+   (struct bfd_link_info *);
++extern bfd_size_type _bfd_elf_convert_gnu_property_size
++  (bfd *, bfd *);
++extern bfd_boolean _bfd_elf_convert_gnu_properties
++  (bfd *, asection *, bfd *, bfd_byte **, bfd_size_type *);
+ 
+ /* The linker may need to keep track of the number of relocs that it
+    decides to copy as dynamic relocs in check_relocs for each symbol.
+diff -rup binutils.orig/bfd/elf-properties.c binutils-2.30/bfd/elf-properties.c
+--- binutils.orig/bfd/elf-properties.c	2020-04-07 11:32:17.280776377 +0100
++++ binutils-2.30/bfd/elf-properties.c	2020-04-07 13:34:03.899784089 +0100
+@@ -198,7 +198,7 @@ next:
+    with ABFD.  */
+ 
+ static bfd_boolean
+-elf_merge_gnu_properties (struct bfd_link_info *info, bfd *abfd,
++elf_merge_gnu_properties (struct bfd_link_info *info, bfd *abfd, bfd *bbfd,
+ 			  elf_property *aprop, elf_property *bprop)
+ {
+   const struct elf_backend_data *bed = get_elf_backend_data (abfd);
+@@ -207,7 +207,7 @@ elf_merge_gnu_properties (struct bfd_lin
+   if (bed->merge_gnu_properties != NULL
+       && pr_type >= GNU_PROPERTY_LOPROC
+       && pr_type < GNU_PROPERTY_LOUSER)
+-    return bed->merge_gnu_properties (info, abfd, aprop, bprop);
++    return bed->merge_gnu_properties (info, abfd, bbfd, aprop, bprop);
+ 
+   switch (pr_type)
+     {
+@@ -241,7 +241,7 @@ elf_merge_gnu_properties (struct bfd_lin
+ 
+ static elf_property *
+ elf_find_and_remove_property (elf_property_list **listp,
+-			      unsigned int type)
++			      unsigned int type, bfd_boolean remove)
+ {
+   elf_property_list *list;
+ 
+@@ -250,7 +250,8 @@ elf_find_and_remove_property (elf_proper
+       if (type == list->property.pr_type)
+ 	{
+ 	  /* Remove this property.  */
+-	  *listp = list->next;
++	  if (remove)
++	    *listp = list->next;
+ 	  return &list->property;
+ 	}
+       else if (type < list->property.pr_type)
+@@ -261,47 +262,241 @@ elf_find_and_remove_property (elf_proper
+   return NULL;
+ }
+ 
+-/* Merge GNU property list *LISTP with ABFD.  */
++/* Merge GNU property list *LISTP in ABFD with FIRST_PBFD.  */
+ 
+ static void
+-elf_merge_gnu_property_list (struct bfd_link_info *info, bfd *abfd,
+-			     elf_property_list **listp)
++elf_merge_gnu_property_list (struct bfd_link_info *info, bfd *first_pbfd,
++			     bfd *abfd, elf_property_list **listp)
+ {
+   elf_property_list *p, **lastp;
+   elf_property *pr;
++  bfd_boolean number_p;
++  bfd_vma number = 0;
+ 
+-  /* Merge each GNU property in ABFD with the one on *LISTP.  */
+-  lastp = &elf_properties (abfd);
++  /* Merge each GNU property in FIRST_PBFD with the one on *LISTP.  */
++  lastp = &elf_properties (first_pbfd);
+   for (p = *lastp; p; p = p->next)
++    if (p->property.pr_kind != property_remove)
++      {
++	if (p->property.pr_kind == property_number)
++	  {
++	    number_p = TRUE;
++	    number = p->property.u.number;
++	  }
++	else
++	  number_p = FALSE;
++	pr = elf_find_and_remove_property (listp, p->property.pr_type,
++					   TRUE);
++	/* Pass NULL to elf_merge_gnu_properties for the property which
++	   isn't on *LISTP.  */
++	elf_merge_gnu_properties (info, first_pbfd, abfd, &p->property, pr);
++	if (p->property.pr_kind == property_remove)
++	  {
++	    if (number_p)
++	      {
++		if (pr != NULL)
++		  info->callbacks->minfo
++		    (_("Removed property %W to merge %pB (0x%v) "
++		       "and %pB (0x%v)\n"),
++		     (bfd_vma) p->property.pr_type, first_pbfd,
++		     number, abfd, pr->u.number);
++		else
++		  info->callbacks->minfo
++		    (_("Removed property %W to merge %pB (0x%v) "
++		       "and %pB (not found)\n"),
++		     (bfd_vma) p->property.pr_type, first_pbfd,
++		     number, abfd);
++	      }
++	    else
++	      {
++		if (pr != NULL)
++		  info->callbacks->minfo
++		    (_("Removed property %W to merge %pB and %pB\n"),
++		     (bfd_vma) p->property.pr_type, first_pbfd, abfd);
++		else
++		  info->callbacks->minfo
++		    (_("Removed property %W to merge %pB and %pB "
++		       "(not found)\n"),
++		     (bfd_vma) p->property.pr_type, first_pbfd, abfd);
++	      }
++
++	    /* Remove this property.  */
++	    *lastp = p->next;
++	    continue;
++	  }
++	else if (number_p)
++	  {
++	    if (pr != NULL)
++	      {
++		if (p->property.u.number != number
++		    || p->property.u.number != pr->u.number)
++		  info->callbacks->minfo
++		    (_("Updated property %W (0x%v) to merge %pB (0x%v) "
++		       "and %pB (0x%v)\n"),
++		     (bfd_vma) p->property.pr_type, p->property.u.number,
++		     first_pbfd, number, abfd, pr->u.number);
++	      }
++	    else
++	      {
++		if (p->property.u.number != number)
++		  info->callbacks->minfo
++		    (_("Updated property %W (%v) to merge %pB (0x%v) "
++		       "and %pB (not found)\n"),
++		     (bfd_vma) p->property.pr_type, p->property.u.number,
++		     first_pbfd, number, abfd);
++	      }
++	  }
++	lastp = &p->next;
++      }
++
++  /* Merge the remaining properties on *LISTP with FIRST_PBFD.  */
++  for (p = *listp; p != NULL; p = p->next)
+     {
+-      pr = elf_find_and_remove_property (listp, p->property.pr_type);
+-      /* Pass NULL to elf_merge_gnu_properties for the property which
+-	 isn't on *LISTP.  */
+-      elf_merge_gnu_properties (info, abfd, &p->property, pr);
+-      if (p->property.pr_kind == property_remove)
++      if (p->property.pr_kind == property_number)
+ 	{
+-	  /* Remove this property.  */
+-	  *lastp = p->next;
+-	  continue;
++	  number_p = TRUE;
++	  number = p->property.u.number;
++	}
++      else
++	number_p = FALSE;
++
++      if (elf_merge_gnu_properties (info, first_pbfd, abfd, NULL, &p->property))
++	{
++	  if (p->property.pr_type == GNU_PROPERTY_NO_COPY_ON_PROTECTED)
++	    elf_has_no_copy_on_protected (first_pbfd) = TRUE;
++
++	  pr = _bfd_elf_get_property (first_pbfd, p->property.pr_type,
++				      p->property.pr_datasz);
++	  /* It must be a new property.  */
++	  if (pr->pr_kind != property_unknown)
++	    abort ();
++	  /* Add a new property.  */
++	  *pr = p->property;
++	}
++      else
++	{
++	  pr = elf_find_and_remove_property (&elf_properties (first_pbfd),
++					     p->property.pr_type,
++					     FALSE);
++	  if (pr == NULL)
++	    {
++	      if (number_p)
++		info->callbacks->minfo
++		  (_("Removed property %W to merge %pB (not found) and "
++		     "%pB (0x%v)\n"),
++		   (bfd_vma) p->property.pr_type, first_pbfd, abfd,
++		   number);
++	      else
++		info->callbacks->minfo
++		  (_("Removed property %W to merge %pB and %pB\n"),
++		   (bfd_vma) p->property.pr_type, first_pbfd, abfd);
++	    }
++	  else if (pr->pr_kind != property_remove)
++	    abort ();
+ 	}
+-      lastp = &p->next;
+     }
++}
+ 
+-  /* Merge the remaining properties on *LISTP with ABFD.  */
+-  for (p = *listp; p != NULL; p = p->next)
+-    if (elf_merge_gnu_properties (info, abfd, NULL, &p->property))
+-      {
+-	if (p->property.pr_type == GNU_PROPERTY_NO_COPY_ON_PROTECTED)
+-	  elf_has_no_copy_on_protected (abfd) = TRUE;
++/* Get GNU property section size.  */
++
++static bfd_size_type
++elf_get_gnu_property_section_size (elf_property_list *list,
++				   unsigned int align_size)
++{
++  bfd_size_type size;
++  unsigned int descsz;
++
++  /* Compute the output section size.  */
++  descsz = offsetof (Elf_External_Note, name[sizeof "GNU"]);
++  descsz = (descsz + 3) & -(unsigned int) 4;
++  size = descsz;
++  for (; list != NULL; list = list->next)
++    {
++      unsigned int datasz;
++      /* Check if this property should be skipped.  */
++      if (list->property.pr_kind == property_remove)
++	continue;
++      /* There are 4 byte type + 4 byte datasz for each property.  */
++      if (list->property.pr_type == GNU_PROPERTY_STACK_SIZE)
++	datasz = align_size;
++      else
++	datasz = list->property.pr_datasz;
++      size += 4 + 4 + datasz;
++      /* Align each property.  */
++      size = (size + (align_size - 1)) & ~(align_size - 1);
++    }
++
++  return size;
++}
++
++/* Write GNU properties.  */
++
++static void
++elf_write_gnu_properties (bfd *abfd, bfd_byte *contents,
++			  elf_property_list *list, unsigned int size,
++			  unsigned int align_size)
++{
++  unsigned int descsz;
++  unsigned int datasz;
++  Elf_External_Note *e_note;
++
++  e_note = (Elf_External_Note *) contents;
++  descsz = offsetof (Elf_External_Note, name[sizeof "GNU"]);
++  descsz = (descsz + 3) & -(unsigned int) 4;
++  bfd_h_put_32 (abfd, sizeof "GNU", &e_note->namesz);
++  bfd_h_put_32 (abfd, size - descsz, &e_note->descsz);
++  bfd_h_put_32 (abfd, NT_GNU_PROPERTY_TYPE_0, &e_note->type);
++  memcpy (e_note->name, "GNU", sizeof "GNU");
++
++  size = descsz;
++  for (; list != NULL; list = list->next)
++    {
++      /* Check if this property should be skipped.  */
++      if (list->property.pr_kind == property_remove)
++	continue;
++      /* There are 4 byte type + 4 byte datasz for each property.  */
++      if (list->property.pr_type == GNU_PROPERTY_STACK_SIZE)
++	datasz = align_size;
++      else
++	datasz = list->property.pr_datasz;
++      bfd_h_put_32 (abfd, list->property.pr_type, contents + size);
++      bfd_h_put_32 (abfd, datasz, contents + size + 4);
++      size += 4 + 4;
++
++      /* Write out property value.  */
++      switch (list->property.pr_kind)
++	{
++	case property_number:
++	  switch (datasz)
++	    {
++	    default:
++	      /* Never should happen.  */
++	      abort ();
++
++	    case 0:
++	      break;
++
++	    case 4:
++	      bfd_h_put_32 (abfd, list->property.u.number,
++			    contents + size);
++	      break;
+ 
+-	pr = _bfd_elf_get_property (abfd, p->property.pr_type,
+-				    p->property.pr_datasz);
+-	/* It must be a new property.  */
+-	if (pr->pr_kind != property_unknown)
++	    case 8:
++	      bfd_h_put_64 (abfd, list->property.u.number,
++			    contents + size);
++	      break;
++	    }
++	  break;
++
++	default:
++	  /* Never should happen.  */
+ 	  abort ();
+-	/* Add a new property.  */
+-	*pr = p->property;
+-      }
++	}
++      size += datasz;
++
++      /* Align each property.  */
++      size = (size + (align_size - 1)) & ~ (align_size - 1);
++    }
+ }
+ 
+ /* Set up GNU properties.  Return the first relocatable ELF input with
+@@ -349,8 +544,13 @@ _bfd_elf_link_setup_gnu_properties (stru
+     return NULL;
+ 
+   /* Merge .note.gnu.property sections.  */
++  info->callbacks->minfo (_("\n"));
++  info->callbacks->minfo (_("Merging program properties\n"));
++  info->callbacks->minfo (_("\n"));
++
+   for (abfd = info->input_bfds; abfd != NULL; abfd = abfd->link.next)
+-    if (abfd != first_pbfd && (abfd->flags & DYNAMIC) == 0)
++    if (abfd != first_pbfd
++	&& (abfd->flags & (DYNAMIC | BFD_PLUGIN | BFD_LINKER_CREATED)) == 0)
+       {
+ 	elf_property_list *null_ptr = NULL;
+ 	elf_property_list **listp = &null_ptr;
+@@ -374,7 +574,7 @@ _bfd_elf_link_setup_gnu_properties (stru
+ 	   when all properties are from ELF objects with different
+ 	   machine code or class.  */
+ 	if (first_pbfd != NULL)
+-	  elf_merge_gnu_property_list (info, first_pbfd, listp);
++	  elf_merge_gnu_property_list (info, first_pbfd, abfd, listp);
+ 
+ 	if (list != NULL)
+ 	  {
+@@ -390,11 +590,9 @@ _bfd_elf_link_setup_gnu_properties (stru
+      always sorted by type even if input GNU properties aren't sorted.  */
+   if (first_pbfd != NULL)
+     {
+-      unsigned int size;
+-      unsigned int descsz;
++      bfd_size_type size;
+       bfd_byte *contents;
+-      Elf_External_Note *e_note;
+-      unsigned int align_size = bed->s->elfclass == ELFCLASS64 ? 8 : 4;
++      unsigned int align_size = elfclass == ELFCLASS64 ? 8 : 4;
+ 
+       sec = bfd_get_section_by_name (first_pbfd,
+ 				     NOTE_GNU_PROPERTY_SECTION_NAME);
+@@ -426,76 +624,28 @@ _bfd_elf_link_setup_gnu_properties (stru
+ 	  return NULL;
+ 	}
+ 
+-      /* Compute the section size.  */
+-      descsz = offsetof (Elf_External_Note, name[sizeof "GNU"]);
+-      descsz = (descsz + 3) & -(unsigned int) 4;
+-      size = descsz;
+-      for (list = elf_properties (first_pbfd);
+-	   list != NULL;
+-	   list = list->next)
++      /* Fix up GNU properties.  */
++      if (bed->fixup_gnu_properties)
++	bed->fixup_gnu_properties (info, &elf_properties (first_pbfd));
++
++      if (elf_properties (first_pbfd) == NULL)
+ 	{
+-	  /* There are 4 byte type + 4 byte datasz for each property.  */
+-	  size += 4 + 4 + list->property.pr_datasz;
+-	  /* Align each property.  */
+-	  size = (size + (align_size - 1)) & ~(align_size - 1);
++	  /* Discard .note.gnu.property section if all properties have
++	     been removed.  */
++	  sec->output_section = bfd_abs_section_ptr;
++	  return NULL;
+ 	}
+ 
++      /* Compute the section size.  */
++      list = elf_properties (first_pbfd);
++      size = elf_get_gnu_property_section_size (list, align_size);
++
+       /* Update .note.gnu.property section now.  */
+       sec->size = size;
+       contents = (bfd_byte *) bfd_zalloc (first_pbfd, size);
+ 
+-      e_note = (Elf_External_Note *) contents;
+-      bfd_h_put_32 (first_pbfd, sizeof "GNU", &e_note->namesz);
+-      bfd_h_put_32 (first_pbfd, size - descsz, &e_note->descsz);
+-      bfd_h_put_32 (first_pbfd, NT_GNU_PROPERTY_TYPE_0, &e_note->type);
+-      memcpy (e_note->name, "GNU", sizeof "GNU");
+-
+-      size = descsz;
+-      for (list = elf_properties (first_pbfd);
+-	   list != NULL;
+-	   list = list->next)
+-	{
+-	  /* There are 4 byte type + 4 byte datasz for each property.  */
+-	  bfd_h_put_32 (first_pbfd, list->property.pr_type,
+-			contents + size);
+-	  bfd_h_put_32 (first_pbfd, list->property.pr_datasz,
+-			contents + size + 4);
+-	  size += 4 + 4;
+-
+-	  /* Write out property value.  */
+-	  switch (list->property.pr_kind)
+-	    {
+-	    case property_number:
+-	      switch (list->property.pr_datasz)
+-		{
+-		default:
+-		  /* Never should happen.  */
+-		  abort ();
+-
+-		case 0:
+-		  break;
+-
+-		case 4:
+-		  bfd_h_put_32 (first_pbfd, list->property.u.number,
+-				contents + size);
+-		  break;
+-
+-		case 8:
+-		  bfd_h_put_64 (first_pbfd, list->property.u.number,
+-				contents + size);
+-		  break;
+-		}
+-	      break;
+-
+-	    default:
+-	      /* Never should happen.  */
+-	      abort ();
+-	    }
+-	  size += list->property.pr_datasz;
+-
+-	  /* Align each property.  */
+-	  size = (size + (align_size - 1)) & ~ (align_size - 1);
+-	}
++      elf_write_gnu_properties (first_pbfd, contents, list, size,
++				align_size);
+ 
+       /* Cache the section contents for elf_link_input_bfd.  */
+       elf_section_data (sec)->this_hdr.contents = contents;
+@@ -508,3 +658,58 @@ _bfd_elf_link_setup_gnu_properties (stru
+ 
+   return first_pbfd;
+ }
++
++/* Convert GNU property size.  */
++
++bfd_size_type
++_bfd_elf_convert_gnu_property_size (bfd *ibfd, bfd *obfd)
++{
++  unsigned int align_size;
++  const struct elf_backend_data *bed;
++  elf_property_list *list = elf_properties (ibfd);
++
++  bed = get_elf_backend_data (obfd);
++  align_size = bed->s->elfclass == ELFCLASS64 ? 8 : 4;
++
++  /* Get the output .note.gnu.property section size.  */
++  return elf_get_gnu_property_section_size (list, align_size);
++}
++
++/* Convert GNU properties.  */
++
++bfd_boolean
++_bfd_elf_convert_gnu_properties (bfd *ibfd, asection *isec,
++				 bfd *obfd, bfd_byte **ptr,
++				 bfd_size_type *ptr_size)
++{
++  unsigned int size;
++  bfd_byte *contents;
++  unsigned int align_shift;
++  const struct elf_backend_data *bed;
++  elf_property_list *list = elf_properties (ibfd);
++
++  bed = get_elf_backend_data (obfd);
++  align_shift = bed->s->elfclass == ELFCLASS64 ? 3 : 2;
++
++  /* Get the output .note.gnu.property section size.  */
++  size = bfd_get_section_size (isec->output_section);
++
++  /* Update the output .note.gnu.property section alignment.  */
++  bfd_set_section_alignment (obfd, isec->output_section, align_shift);
++
++  if (size > bfd_get_section_size (isec))
++    {
++      contents = (bfd_byte *) bfd_malloc (size);
++      free (*ptr);
++      *ptr = contents;
++    }
++  else
++    contents = *ptr;
++
++  *ptr_size = size;
++
++  /* Generate the output .note.gnu.property section.  */
++  elf_write_gnu_properties (ibfd, contents, list, size, 1 << align_shift);
++
++  return TRUE;
++}
+diff -rup binutils.orig/bfd/elf.c binutils-2.30/bfd/elf.c
+--- binutils.orig/bfd/elf.c	2020-04-07 11:32:17.260776522 +0100
++++ binutils-2.30/bfd/elf.c	2020-04-07 13:34:03.898784096 +0100
+@@ -4376,6 +4376,14 @@ get_program_header_size (bfd *abfd, stru
+       ++segs;
+     }
+ 
++  s = bfd_get_section_by_name (abfd,
++			       NOTE_GNU_PROPERTY_SECTION_NAME);
++  if (s != NULL && s->size != 0)
++    {
++      /* We need a PT_GNU_PROPERTY segment.  */
++      ++segs;
++    }
++
+   for (s = abfd->sections; s != NULL; s = s->next)
+     {
+       if ((s->flags & SEC_LOAD) != 0
+@@ -5028,6 +5036,24 @@ _bfd_elf_map_sections_to_segments (bfd *
+ 	      pm = &m->next;
+ 	    }
+ 
++      s = bfd_get_section_by_name (abfd,
++				   NOTE_GNU_PROPERTY_SECTION_NAME);
++      if (s != NULL && s->size != 0)
++	{
++	  amt = sizeof (struct elf_segment_map) + sizeof (asection *);
++	  m = bfd_zalloc (abfd, amt);
++	  if (m == NULL)
++	    goto error_return;
++	  m->next = NULL;
++	  m->p_type = PT_GNU_PROPERTY;
++	  m->count = 1;
++	  m->p_flags_valid = 1;
++	  m->sections[0] = s;
++	  m->p_flags = PF_R;
++	  *pm = m;
++	  pm = &m->next;
++	}
++
+       /* If there is a .eh_frame_hdr section, throw in a PT_GNU_EH_FRAME
+ 	 segment.  */
+       eh_frame_hdr = elf_eh_frame_hdr (abfd);
+diff -rup binutils.orig/bfd/elfxx-target.h binutils-2.30/bfd/elfxx-target.h
+--- binutils.orig/bfd/elfxx-target.h	2020-04-07 11:32:17.267776472 +0100
++++ binutils-2.30/bfd/elfxx-target.h	2020-04-07 13:34:03.899784089 +0100
+@@ -543,6 +543,9 @@
+ #ifndef elf_backend_setup_gnu_properties
+ #define elf_backend_setup_gnu_properties	_bfd_elf_link_setup_gnu_properties
+ #endif
++#ifndef elf_backend_fixup_gnu_properties
++#define elf_backend_fixup_gnu_properties	NULL
++#endif
+ #ifndef elf_backend_static_tls_alignment
+ #define elf_backend_static_tls_alignment	1
+ #endif
+@@ -884,6 +887,7 @@ static struct elf_backend_data elfNN_bed
+   elf_backend_parse_gnu_properties,
+   elf_backend_merge_gnu_properties,
+   elf_backend_setup_gnu_properties,
++  elf_backend_fixup_gnu_properties,
+   elf_backend_compact_eh_encoding,
+   elf_backend_cant_unwind_opcode,
+   elf_backend_init_secondary_reloc_section,
+diff -rup binutils.orig/bfd/elfxx-x86.c binutils-2.30/bfd/elfxx-x86.c
+--- binutils.orig/bfd/elfxx-x86.c	2020-04-07 11:32:17.271776442 +0100
++++ binutils-2.30/bfd/elfxx-x86.c	2020-04-07 13:34:03.899784089 +0100
+@@ -2271,33 +2271,29 @@ _bfd_x86_elf_parse_gnu_properties (bfd *
+ {
+   elf_property *prop;
+ 
+-  switch (type)
++  if (type == GNU_PROPERTY_X86_COMPAT_ISA_1_USED
++      || type == GNU_PROPERTY_X86_COMPAT_ISA_1_NEEDED
++      || (type >= GNU_PROPERTY_X86_UINT32_AND_LO
++	  && type <= GNU_PROPERTY_X86_UINT32_AND_HI)
++      || (type >= GNU_PROPERTY_X86_UINT32_OR_LO
++	  && type <= GNU_PROPERTY_X86_UINT32_OR_HI)
++      || (type >= GNU_PROPERTY_X86_UINT32_OR_AND_LO
++	  && type <= GNU_PROPERTY_X86_UINT32_OR_AND_HI))
+     {
+-    case GNU_PROPERTY_X86_ISA_1_USED:
+-    case GNU_PROPERTY_X86_ISA_1_NEEDED:
+-    case GNU_PROPERTY_X86_FEATURE_1_AND:
+       if (datasz != 4)
+ 	{
+ 	  _bfd_error_handler
+-	    ((type == GNU_PROPERTY_X86_ISA_1_USED
+-	      ? _("error: %B: <corrupt x86 ISA used size: 0x%x>")
+-	      : (type == GNU_PROPERTY_X86_ISA_1_NEEDED
+-		 ? _("error: %B: <corrupt x86 ISA needed size: 0x%x>")
+-		 : _("error: %B: <corrupt x86 feature size: 0x%x>"))),
+-	     abfd, datasz);
++	    (_("error: %pB: <corrupt x86 property (0x%x) size: 0x%x>"),
++	     abfd, type, datasz);
+ 	  return property_corrupt;
+ 	}
+       prop = _bfd_elf_get_property (abfd, type, datasz);
+-      /* Combine properties of the same type.  */
+       prop->u.number |= bfd_h_get_32 (abfd, ptr);
+       prop->pr_kind = property_number;
+-      break;
+-
+-    default:
+-      return property_ignored;
++      return property_number;
+     }
+ 
+-  return property_number;
++  return property_ignored;
+ }
+ 
+ /* Merge x86 GNU property BPROP with APROP.  If APROP isn't NULL,
+@@ -2307,6 +2303,7 @@ _bfd_x86_elf_parse_gnu_properties (bfd *
+ bfd_boolean
+ _bfd_x86_elf_merge_gnu_properties (struct bfd_link_info *info,
+ 				   bfd *abfd ATTRIBUTE_UNUSED,
++				   bfd *bbfd ATTRIBUTE_UNUSED,
+ 				   elf_property *aprop,
+ 				   elf_property *bprop)
+ {
+@@ -2314,15 +2311,38 @@ _bfd_x86_elf_merge_gnu_properties (struc
+   bfd_boolean updated = FALSE;
+   unsigned int pr_type = aprop != NULL ? aprop->pr_type : bprop->pr_type;
+ 
+-  switch (pr_type)
++  if (pr_type == GNU_PROPERTY_X86_COMPAT_ISA_1_USED
++      || (pr_type >= GNU_PROPERTY_X86_UINT32_OR_AND_LO
++	  && pr_type <= GNU_PROPERTY_X86_UINT32_OR_AND_HI))
++    {
++      if (aprop == NULL || bprop == NULL)
++	{
++	  /* Only one of APROP and BPROP can be NULL.  */
++	  if (aprop != NULL)
++	    {
++	      /* Remove this property since the other input file doesn't
++		 have it.  */
++	      aprop->pr_kind = property_remove;
++	      updated = TRUE;
++	    }
++	}
++      else
++	{
++	  number = aprop->u.number;
++	  aprop->u.number = number | bprop->u.number;
++	  updated = number != (unsigned int) aprop->u.number;
++	}
++      return updated;
++    }
++  else if (pr_type == GNU_PROPERTY_X86_COMPAT_ISA_1_NEEDED
++	   || (pr_type >= GNU_PROPERTY_X86_UINT32_OR_LO
++	       && pr_type <= GNU_PROPERTY_X86_UINT32_OR_HI))
+     {
+-    case GNU_PROPERTY_X86_ISA_1_USED:
+-    case GNU_PROPERTY_X86_ISA_1_NEEDED:
+       if (aprop != NULL && bprop != NULL)
+ 	{
+ 	  number = aprop->u.number;
+ 	  aprop->u.number = number | bprop->u.number;
+-	  /* Remove the property if ISA bits are empty.  */
++	  /* Remove the property if all bits are empty.  */
+ 	  if (aprop->u.number == 0)
+ 	    {
+ 	      aprop->pr_kind = property_remove;
+@@ -2338,27 +2358,35 @@ _bfd_x86_elf_merge_gnu_properties (struc
+ 	    {
+ 	      if (aprop->u.number == 0)
+ 		{
+-		  /* Remove APROP if ISA bits are empty.  */
++		  /* Remove APROP if all bits are empty.  */
+ 		  aprop->pr_kind = property_remove;
+ 		  updated = TRUE;
+ 		}
+ 	    }
+ 	  else
+ 	    {
+-	      /* Return TRUE if APROP is NULL and ISA bits of BPROP
++	      /* Return TRUE if APROP is NULL and all bits of BPROP
+ 		 aren't empty to indicate that BPROP should be added
+ 		 to ABFD.  */
+ 	      updated = bprop->u.number != 0;
+ 	    }
+ 	}
+-      break;
+-
+-    case GNU_PROPERTY_X86_FEATURE_1_AND:
++      return updated;
++    }
++  else if (pr_type >= GNU_PROPERTY_X86_UINT32_AND_LO
++	   && pr_type <= GNU_PROPERTY_X86_UINT32_AND_HI)
++    {
+       /* Only one of APROP and BPROP can be NULL:
+ 	 1. APROP & BPROP when both APROP and BPROP aren't NULL.
+ 	 2. If APROP is NULL, remove x86 feature.
+ 	 3. Otherwise, do nothing.
+        */
++      const struct elf_backend_data *bed
++	= get_elf_backend_data (info->output_bfd);
++      struct elf_x86_link_hash_table *htab
++	= elf_x86_hash_table (info, bed->target_id);
++      if (!htab)
++	abort ();
+       if (aprop != NULL && bprop != NULL)
+ 	{
+ 	  features = 0;
+@@ -2404,9 +2432,10 @@ _bfd_x86_elf_merge_gnu_properties (struc
+ 	      updated = TRUE;
+ 	    }
+ 	}
+-      break;
+-
+-    default:
++      return updated;
++    }
++  else
++    {
+       /* Never should happen.  */
+       abort ();
+     }
+@@ -2434,12 +2463,12 @@ _bfd_x86_elf_link_setup_gnu_properties
+   const struct elf_backend_data *bed;
+   unsigned int class_align = ABI_64_P (info->output_bfd) ? 3 : 2;
+   unsigned int got_align;
+-
+-  features = 0;
+-  if (info->ibt)
+-    features = GNU_PROPERTY_X86_FEATURE_1_IBT;
+-  if (info->shstk)
+-    features |= GNU_PROPERTY_X86_FEATURE_1_SHSTK;
++  enum report
++  {
++   report_none	= 0,	    /* Do nothing.  */
++   report_ibt	= 1 << 2,   /* Report missing IBT property.  */
++   report_shstk	= 1 << 3    /* Report missing SHSTK property.  */
++  } report;
+ 
+   /* Find a normal input file with GNU property note.  */
+   for (pbfd = info->input_bfds;
+@@ -2454,18 +2483,46 @@ _bfd_x86_elf_link_setup_gnu_properties
+ 	  break;
+       }
+ 
+-  if (ebfd != NULL && features)
++  bed = get_elf_backend_data (info->output_bfd);
++
++  htab = elf_x86_hash_table (info, bed->target_id);
++  if (htab == NULL)
++    return pbfd;
++
++  features = 0;
++  report = report_ibt | report_shstk;
++
++  if (info->ibt)
+     {
+-      /* If features is set, add GNU_PROPERTY_X86_FEATURE_1_IBT and
+-	 GNU_PROPERTY_X86_FEATURE_1_SHSTK.  */
+-      prop = _bfd_elf_get_property (ebfd,
+-				    GNU_PROPERTY_X86_FEATURE_1_AND,
+-				    4);
+-      prop->u.number |= features;
+-      prop->pr_kind = property_number;
++      features = GNU_PROPERTY_X86_FEATURE_1_IBT;
++      report &= ~ report_ibt;
++    }
++
++  if (info->shstk)
++    {
++      features |= GNU_PROPERTY_X86_FEATURE_1_SHSTK;
++      report &= ~ report_shstk;
++    }
++
++  if (report == 0)
++    info->cet_report = 0;
++
++  if (ebfd != NULL)
++    {
++      prop = NULL;
++      if (features)
++	{
++	  /* If features is set, add GNU_PROPERTY_X86_FEATURE_1_IBT and
++	     GNU_PROPERTY_X86_FEATURE_1_SHSTK.  */
++	  prop = _bfd_elf_get_property (ebfd,
++					GNU_PROPERTY_X86_FEATURE_1_AND,
++					4);
++	  prop->u.number |= features;
++	  prop->pr_kind = property_number;
++	}
+ 
+       /* Create the GNU property note section if needed.  */
+-      if (pbfd == NULL)
++      if (prop != NULL && pbfd == NULL)
+ 	{
+ 	  sec = bfd_make_section_with_flags (ebfd,
+ 					     NOTE_GNU_PROPERTY_SECTION_NAME,
+@@ -2481,7 +2538,7 @@ _bfd_x86_elf_link_setup_gnu_properties
+ 	  if (!bfd_set_section_alignment (ebfd, sec, class_align))
+ 	    {
+ error_alignment:
+-	      info->callbacks->einfo (_("%F%A: failed to align section\n"),
++	      info->callbacks->einfo (_("%F%pA: failed to align section\n"),
+ 				      sec);
+ 	    }
+ 
+@@ -2489,13 +2546,53 @@ error_alignment:
+ 	}
+     }
+ 
+-  pbfd = _bfd_elf_link_setup_gnu_properties (info);
++  if (info->cet_report)
++    {
++      /* Report missing IBT and SHSTK properties.  */
++      bfd *abfd;
++      const char *msg;
++      elf_property_list *p;
++      bfd_boolean missing_ibt, missing_shstk;
++      bfd_boolean check_ibt   = !!(report & report_ibt);
++      bfd_boolean check_shstk = !!(report & report_shstk);
+ 
+-  bed = get_elf_backend_data (info->output_bfd);
++      if (info->cet_report == 1)
++	msg = _("%P: %B: warning: missing %s\n");
++      else
++	msg = _("%X%P: %B: error: missing %s\n");
+ 
+-  htab = elf_x86_hash_table (info, bed->target_id);
+-  if (htab == NULL)
+-    return pbfd;
++      for (abfd = info->input_bfds; abfd != NULL; abfd = abfd->link.next)
++	if (!(abfd->flags & (DYNAMIC | BFD_PLUGIN | BFD_LINKER_CREATED))
++	    && bfd_get_flavour (abfd) == bfd_target_elf_flavour)
++	  {
++	    for (p = elf_properties (abfd); p; p = p->next)
++	      if (p->property.pr_type == GNU_PROPERTY_X86_FEATURE_1_AND)
++		break;
++
++	    missing_ibt = check_ibt;
++	    missing_shstk = check_shstk;
++	    if (p)
++	      {
++		missing_ibt &= !(p->property.u.number
++				 & GNU_PROPERTY_X86_FEATURE_1_IBT);
++		missing_shstk &= !(p->property.u.number
++				   & GNU_PROPERTY_X86_FEATURE_1_SHSTK);
++	      }
++	    if (missing_ibt || missing_shstk)
++	      {
++		const char *missing;
++		if (missing_ibt && missing_shstk)
++		  missing = _("IBT and SHSTK properties");
++		else if (missing_ibt)
++		  missing = _("IBT property");
++		else
++		  missing = _("SHSTK property");
++		info->callbacks->einfo (msg, abfd, missing);
++	      }
++	  }
++    }
++
++  pbfd = _bfd_elf_link_setup_gnu_properties (info);
+ 
+   htab->r_info = init_table->r_info;
+   htab->r_sym = init_table->r_sym;
+@@ -2806,3 +2903,47 @@ error_alignment:
+ 
+   return pbfd;
+ }
++
++/* Fix up x86 GNU properties.  */
++
++void
++_bfd_x86_elf_link_fixup_gnu_properties
++  (struct bfd_link_info *info ATTRIBUTE_UNUSED,
++   elf_property_list **listp)
++{
++  elf_property_list *p;
++
++  for (p = *listp; p; p = p->next)
++    {
++      unsigned int type = p->property.pr_type;
++
++      if (type == GNU_PROPERTY_X86_COMPAT_ISA_1_USED
++	  || type == GNU_PROPERTY_X86_COMPAT_ISA_1_NEEDED
++	  || (type >= GNU_PROPERTY_X86_UINT32_AND_LO
++	      && type <= GNU_PROPERTY_X86_UINT32_AND_HI)
++	  || (type >= GNU_PROPERTY_X86_UINT32_OR_LO
++	      && type <= GNU_PROPERTY_X86_UINT32_OR_HI)
++	  || (type >= GNU_PROPERTY_X86_UINT32_OR_AND_LO
++	      && type <= GNU_PROPERTY_X86_UINT32_OR_AND_HI))
++	{
++	  if (p->property.u.number == 0
++	      && (type == GNU_PROPERTY_X86_COMPAT_ISA_1_NEEDED
++		  || (type >= GNU_PROPERTY_X86_UINT32_AND_LO
++		      && type <= GNU_PROPERTY_X86_UINT32_AND_HI)
++		  || (type >= GNU_PROPERTY_X86_UINT32_OR_LO
++		      && type <= GNU_PROPERTY_X86_UINT32_OR_HI)))
++	    {
++	      /* Remove empty property.  */
++	      *listp = p->next;
++	      continue;
++	    }
++
++	  listp = &p->next;
++	}
++      else if (type > GNU_PROPERTY_HIPROC)
++	{
++	  /* The property list is sorted in order of type.  */
++	  break;
++	}
++    }
++}
+diff -rup binutils.orig/bfd/elfxx-x86.h binutils-2.30/bfd/elfxx-x86.h
+--- binutils.orig/bfd/elfxx-x86.h	2020-04-07 11:32:17.280776377 +0100
++++ binutils-2.30/bfd/elfxx-x86.h	2020-04-07 13:34:03.900784082 +0100
+@@ -653,11 +653,14 @@ extern enum elf_property_kind _bfd_x86_e
+   (bfd *, unsigned int, bfd_byte *, unsigned int);
+ 
+ extern bfd_boolean _bfd_x86_elf_merge_gnu_properties
+-  (struct bfd_link_info *, bfd *, elf_property *, elf_property *);
++  (struct bfd_link_info *, bfd *, bfd *, elf_property *, elf_property *);
+ 
+ extern bfd * _bfd_x86_elf_link_setup_gnu_properties
+   (struct bfd_link_info *, struct elf_x86_init_table *);
+ 
++extern void _bfd_x86_elf_link_fixup_gnu_properties
++  (struct bfd_link_info *, elf_property_list **);
++
+ #define bfd_elf64_mkobject \
+   _bfd_x86_elf_mkobject
+ #define bfd_elf32_mkobject \
+@@ -693,3 +696,5 @@ extern bfd * _bfd_x86_elf_link_setup_gnu
+   _bfd_x86_elf_parse_gnu_properties
+ #define elf_backend_merge_gnu_properties \
+   _bfd_x86_elf_merge_gnu_properties
++#define elf_backend_fixup_gnu_properties \
++  _bfd_x86_elf_link_fixup_gnu_properties
+diff -rup binutils.orig/binutils/readelf.c binutils-2.30/binutils/readelf.c
+--- binutils.orig/binutils/readelf.c	2020-04-07 11:32:17.244776638 +0100
++++ binutils-2.30/binutils/readelf.c	2020-04-07 13:34:03.901784074 +0100
+@@ -3910,6 +3910,7 @@ get_segment_type (Filedata * filedata, u
+     case PT_GNU_EH_FRAME: return "GNU_EH_FRAME";
+     case PT_GNU_STACK:	return "GNU_STACK";
+     case PT_GNU_RELRO:  return "GNU_RELRO";
++    case PT_GNU_PROPERTY: return "GNU_PROPERTY";
+ 
+     default:
+       if (p_type >= PT_GNU_MBIND_LO && p_type <= PT_GNU_MBIND_HI)
+@@ -16843,8 +16844,87 @@ get_gnu_elf_note_type (unsigned e_type)
+ }
+ 
+ static void
++decode_x86_compat_isa (unsigned int bitmask)
++{
++  while (bitmask)
++    {
++      unsigned int bit = bitmask & (- bitmask);
++
++      bitmask &= ~ bit;
++      switch (bit)
++	{
++	case GNU_PROPERTY_X86_COMPAT_ISA_1_486:
++	  printf ("i486");
++	  break;
++	case GNU_PROPERTY_X86_COMPAT_ISA_1_586:
++	  printf ("586");
++	  break;
++	case GNU_PROPERTY_X86_COMPAT_ISA_1_686:
++	  printf ("686");
++	  break;
++	case GNU_PROPERTY_X86_COMPAT_ISA_1_SSE:
++	  printf ("SSE");
++	  break;
++	case GNU_PROPERTY_X86_COMPAT_ISA_1_SSE2:
++	  printf ("SSE2");
++	  break;
++	case GNU_PROPERTY_X86_COMPAT_ISA_1_SSE3:
++	  printf ("SSE3");
++	  break;
++	case GNU_PROPERTY_X86_COMPAT_ISA_1_SSSE3:
++	  printf ("SSSE3");
++	  break;
++	case GNU_PROPERTY_X86_COMPAT_ISA_1_SSE4_1:
++	  printf ("SSE4_1");
++	  break;
++	case GNU_PROPERTY_X86_COMPAT_ISA_1_SSE4_2:
++	  printf ("SSE4_2");
++	  break;
++	case GNU_PROPERTY_X86_COMPAT_ISA_1_AVX:
++	  printf ("AVX");
++	  break;
++	case GNU_PROPERTY_X86_COMPAT_ISA_1_AVX2:
++	  printf ("AVX2");
++	  break;
++	case GNU_PROPERTY_X86_COMPAT_ISA_1_AVX512F:
++	  printf ("AVX512F");
++	  break;
++	case GNU_PROPERTY_X86_COMPAT_ISA_1_AVX512CD:
++	  printf ("AVX512CD");
++	  break;
++	case GNU_PROPERTY_X86_COMPAT_ISA_1_AVX512ER:
++	  printf ("AVX512ER");
++	  break;
++	case GNU_PROPERTY_X86_COMPAT_ISA_1_AVX512PF:
++	  printf ("AVX512PF");
++	  break;
++	case GNU_PROPERTY_X86_COMPAT_ISA_1_AVX512VL:
++	  printf ("AVX512VL");
++	  break;
++	case GNU_PROPERTY_X86_COMPAT_ISA_1_AVX512DQ:
++	  printf ("AVX512DQ");
++	  break;
++	case GNU_PROPERTY_X86_COMPAT_ISA_1_AVX512BW:
++	  printf ("AVX512BW");
++	  break;
++	default:
++	  printf (_("<unknown: %x>"), bit);
++	  break;
++	}
++      if (bitmask)
++	printf (", ");
++    }
++}
++
++static void
+ decode_x86_isa (unsigned int bitmask)
+ {
++  if (!bitmask)
++    {
++      printf (_("<None>"));
++      return;
++    }
++
+   while (bitmask)
+     {
+       unsigned int bit = bitmask & (- bitmask);
+@@ -16852,25 +16932,84 @@ decode_x86_isa (unsigned int bitmask)
+       bitmask &= ~ bit;
+       switch (bit)
+ 	{
+-	case GNU_PROPERTY_X86_ISA_1_486: printf ("i486"); break;
+-	case GNU_PROPERTY_X86_ISA_1_586: printf ("586"); break;
+-	case GNU_PROPERTY_X86_ISA_1_686: printf ("686"); break;
+-	case GNU_PROPERTY_X86_ISA_1_SSE: printf ("SSE"); break;
+-	case GNU_PROPERTY_X86_ISA_1_SSE2: printf ("SSE2"); break;
+-	case GNU_PROPERTY_X86_ISA_1_SSE3: printf ("SSE3"); break;
+-	case GNU_PROPERTY_X86_ISA_1_SSSE3: printf ("SSSE3"); break;
+-	case GNU_PROPERTY_X86_ISA_1_SSE4_1: printf ("SSE4_1"); break;
+-	case GNU_PROPERTY_X86_ISA_1_SSE4_2: printf ("SSE4_2"); break;
+-	case GNU_PROPERTY_X86_ISA_1_AVX: printf ("AVX"); break;
+-	case GNU_PROPERTY_X86_ISA_1_AVX2: printf ("AVX2"); break;
+-	case GNU_PROPERTY_X86_ISA_1_AVX512F: printf ("AVX512F"); break;
+-	case GNU_PROPERTY_X86_ISA_1_AVX512CD: printf ("AVX512CD"); break;
+-	case GNU_PROPERTY_X86_ISA_1_AVX512ER: printf ("AVX512ER"); break;
+-	case GNU_PROPERTY_X86_ISA_1_AVX512PF: printf ("AVX512PF"); break;
+-	case GNU_PROPERTY_X86_ISA_1_AVX512VL: printf ("AVX512VL"); break;
+-	case GNU_PROPERTY_X86_ISA_1_AVX512DQ: printf ("AVX512DQ"); break;
+-	case GNU_PROPERTY_X86_ISA_1_AVX512BW: printf ("AVX512BW"); break;
+-	default: printf (_("<unknown: %x>"), bit); break;
++	case GNU_PROPERTY_X86_ISA_1_CMOV:
++	  printf ("CMOV");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_SSE:
++	  printf ("SSE");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_SSE2:
++	  printf ("SSE2");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_SSE3:
++	  printf ("SSE3");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_SSSE3:
++	  printf ("SSSE3");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_SSE4_1:
++	  printf ("SSE4_1");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_SSE4_2:
++	  printf ("SSE4_2");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_AVX:
++	  printf ("AVX");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_AVX2:
++	  printf ("AVX2");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_FMA:
++	  printf ("FMA");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_AVX512F:
++	  printf ("AVX512F");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_AVX512CD:
++	  printf ("AVX512CD");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_AVX512ER:
++	  printf ("AVX512ER");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_AVX512PF:
++	  printf ("AVX512PF");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_AVX512VL:
++	  printf ("AVX512VL");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_AVX512DQ:
++	  printf ("AVX512DQ");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_AVX512BW:
++	  printf ("AVX512BW");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_AVX512_4FMAPS:
++	  printf ("AVX512_4FMAPS");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_AVX512_4VNNIW:
++	  printf ("AVX512_4VNNIW");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_AVX512_BITALG:
++	  printf ("AVX512_BITALG");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_AVX512_IFMA:
++	  printf ("AVX512_IFMA");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_AVX512_VBMI:
++	  printf ("AVX512_VBMI");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_AVX512_VBMI2:
++	  printf ("AVX512_VBMI2");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_AVX512_VNNI:
++	  printf ("AVX512_VNNI");
++	  break;
++	case GNU_PROPERTY_X86_ISA_1_AVX512_BF16:
++	  printf ("AVX512_BF16");
++	  break;
++	default:
++	  printf (_("<unknown: %x>"), bit);
++	  break;
+ 	}
+       if (bitmask)
+ 	printf (", ");
+@@ -16878,8 +17017,14 @@ decode_x86_isa (unsigned int bitmask)
+ }
+ 
+ static void
+-decode_x86_feature (unsigned int type, unsigned int bitmask)
++decode_x86_feature_1 (unsigned int bitmask)
+ {
++  if (!bitmask)
++    {
++      printf (_("<None>"));
++      return;
++    }
++
+   while (bitmask)
+     {
+       unsigned int bit = bitmask & (- bitmask);
+@@ -16888,26 +17033,65 @@ decode_x86_feature (unsigned int type, u
+       switch (bit)
+ 	{
+ 	case GNU_PROPERTY_X86_FEATURE_1_IBT:
+-	  switch (type)
+-	    {
+-	    case GNU_PROPERTY_X86_FEATURE_1_AND:
+-	      printf ("IBT");
+-	      break;
+-	    default:
+-	      /* This should never happen.  */
+-	      abort ();
+-	    }
++	  printf ("IBT");
+ 	  break;
+ 	case GNU_PROPERTY_X86_FEATURE_1_SHSTK:
+-	  switch (type)
+-	    {
+-	    case GNU_PROPERTY_X86_FEATURE_1_AND:
+-	      printf ("SHSTK");
+-	      break;
+-	    default:
+-	      /* This should never happen.  */
+-	      abort ();
+-	    }
++	  printf ("SHSTK");
++	  break;
++	default:
++	  printf (_("<unknown: %x>"), bit);
++	  break;
++	}
++      if (bitmask)
++	printf (", ");
++    }
++}
++
++static void
++decode_x86_feature_2 (unsigned int bitmask)
++{
++  if (!bitmask)
++    {
++      printf (_("<None>"));
++      return;
++    }
++
++  while (bitmask)
++    {
++      unsigned int bit = bitmask & (- bitmask);
++
++      bitmask &= ~ bit;
++      switch (bit)
++	{
++	case GNU_PROPERTY_X86_FEATURE_2_X86:
++	  printf ("x86");
++	  break;
++	case GNU_PROPERTY_X86_FEATURE_2_X87:
++	  printf ("x87");
++	  break;
++	case GNU_PROPERTY_X86_FEATURE_2_MMX:
++	  printf ("MMX");
++	  break;
++	case GNU_PROPERTY_X86_FEATURE_2_XMM:
++	  printf ("XMM");
++	  break;
++	case GNU_PROPERTY_X86_FEATURE_2_YMM:
++	  printf ("YMM");
++	  break;
++	case GNU_PROPERTY_X86_FEATURE_2_ZMM:
++	  printf ("ZMM");
++	  break;
++	case GNU_PROPERTY_X86_FEATURE_2_FXSR:
++	  printf ("FXSR");
++	  break;
++	case GNU_PROPERTY_X86_FEATURE_2_XSAVE:
++	  printf ("XSAVE");
++	  break;
++	case GNU_PROPERTY_X86_FEATURE_2_XSAVEOPT:
++	  printf ("XSAVEOPT");
++	  break;
++	case GNU_PROPERTY_X86_FEATURE_2_XSAVEC:
++	  printf ("XSAVEC");
+ 	  break;
+ 	default:
+ 	  printf (_("<unknown: %x>"), bit);
+@@ -16963,30 +17147,89 @@ print_gnu_property_note (Filedata * file
+ 	      || filedata->file_header.e_machine == EM_IAMCU
+ 	      || filedata->file_header.e_machine == EM_386)
+ 	    {
++	      unsigned int bitmask;
++
++	      if (datasz == 4)
++		bitmask = byte_get (ptr, 4);
++	      else
++		bitmask = 0;
++
+ 	      switch (type)
+ 		{
+ 		case GNU_PROPERTY_X86_ISA_1_USED:
+-		  printf ("x86 ISA used: ");
+ 		  if (datasz != 4)
+-		    printf (_("<corrupt length: %#x> "), datasz);
++		    printf (_("x86 ISA used: <corrupt length: %#x> "),
++			    datasz);
+ 		  else
+-		    decode_x86_isa (byte_get (ptr, 4));
++		    {
++		      printf ("x86 ISA used: ");
++		      decode_x86_isa (bitmask);
++		    }
+ 		  goto next;
+ 
+ 		case GNU_PROPERTY_X86_ISA_1_NEEDED:
+-		  printf ("x86 ISA needed: ");
+ 		  if (datasz != 4)
+-		    printf (_("<corrupt length: %#x> "), datasz);
++		    printf (_("x86 ISA needed: <corrupt length: %#x> "),
++			    datasz);
+ 		  else
+-		    decode_x86_isa (byte_get (ptr, 4));
++		    {
++		      printf ("x86 ISA needed: ");
++		      decode_x86_isa (bitmask);
++		    }
+ 		  goto next;
+ 
+ 		case GNU_PROPERTY_X86_FEATURE_1_AND:
+-		  printf ("x86 feature: ");
+ 		  if (datasz != 4)
+-		    printf (_("<corrupt length: %#x> "), datasz);
++		    printf (_("x86 feature: <corrupt length: %#x> "),
++			    datasz);
+ 		  else
+-		    decode_x86_feature (type, byte_get (ptr, 4));
++		    {
++		      printf ("x86 feature: ");
++		      decode_x86_feature_1 (bitmask);
++		    }
++		  goto next;
++
++		case GNU_PROPERTY_X86_FEATURE_2_USED:
++		  if (datasz != 4)
++		    printf (_("x86 feature used: <corrupt length: %#x> "),
++			    datasz);
++		  else
++		    {
++		      printf ("x86 feature used: ");
++		      decode_x86_feature_2 (bitmask);
++		    }
++		  goto next;
++
++		case GNU_PROPERTY_X86_FEATURE_2_NEEDED:
++		  if (datasz != 4)
++		    printf (_("x86 feature needed: <corrupt length: %#x> "), datasz);
++		  else
++		    {
++		      printf ("x86 feature needed: ");
++		      decode_x86_feature_2 (bitmask);
++		    }
++		  goto next;
++
++		case GNU_PROPERTY_X86_COMPAT_ISA_1_USED:
++		  if (datasz != 4)
++		    printf (_("x86 ISA used: <corrupt length: %#x> "),
++			    datasz);
++		  else
++		    {
++		      printf ("x86 ISA used: ");
++		      decode_x86_compat_isa (bitmask);
++		    }
++		  goto next;
++
++		case GNU_PROPERTY_X86_COMPAT_ISA_1_NEEDED:
++		  if (datasz != 4)
++		    printf (_("x86 ISA needed: <corrupt length: %#x> "),
++			    datasz);
++		  else
++		    {
++		      printf ("x86 ISA needed: ");
++		      decode_x86_compat_isa (bitmask);
++		    }
+ 		  goto next;
+ 
+ 		default:
+@@ -17144,7 +17387,7 @@ print_gnu_note (Filedata * filedata, Elf
+     case NT_GNU_PROPERTY_TYPE_0:
+       print_gnu_property_note (filedata, pnote);
+       break;
+-      
++
+     default:
+       /* Handle unrecognised types.  An error message should have already been
+ 	 created by get_gnu_elf_note_type(), so all that we need to do is to
+diff -rup binutils.orig/binutils/testsuite/binutils-all/i386/empty.d binutils-2.30/binutils/testsuite/binutils-all/i386/empty.d
+--- binutils.orig/binutils/testsuite/binutils-all/i386/empty.d	2020-04-07 11:32:17.248776609 +0100
++++ binutils-2.30/binutils/testsuite/binutils-all/i386/empty.d	2020-04-07 13:34:03.901784074 +0100
+@@ -6,4 +6,4 @@
+ Displaying notes found in: .note.gnu.property
+   Owner                 Data size	Description
+   GNU                  0x0000000c	NT_GNU_PROPERTY_TYPE_0
+-      Properties: x86 feature: 
++      Properties: x86 feature: <None>
+diff -rup binutils.orig/binutils/testsuite/binutils-all/i386/pr21231b.d binutils-2.30/binutils/testsuite/binutils-all/i386/pr21231b.d
+--- binutils.orig/binutils/testsuite/binutils-all/i386/pr21231b.d	2020-04-07 11:32:17.248776609 +0100
++++ binutils-2.30/binutils/testsuite/binutils-all/i386/pr21231b.d	2020-04-07 13:34:03.901784074 +0100
+@@ -1,5 +1,5 @@
+ #PROG: objcopy
+-#as: --32
++#as: --32 -mx86-used-note=yes
+ #objcopy:
+ #readelf: -n
+ 
+@@ -8,5 +8,8 @@ Displaying notes found in: .note.gnu.pro
+   GNU                  0x0000002c	NT_GNU_PROPERTY_TYPE_0
+       Properties: stack size: 0x800000
+ 	no copy on protected 
+-	x86 ISA used: i486, 586, 686, SSE, SSE2, SSE3, SSSE3, SSE4_1, SSE4_2, AVX, AVX2, AVX512F, AVX512CD, AVX512ER, AVX512PF, AVX512VL, AVX512DQ, AVX512BW, <unknown: 40000>, <unknown: 80000>, <unknown: 100000>, <unknown: 200000>, <unknown: 400000>, <unknown: 800000>, <unknown: 1000000>, <unknown: 2000000>, <unknown: 4000000>, <unknown: 8000000>, <unknown: 10000000>, <unknown: 20000000>, <unknown: 40000000>, <unknown: 80000000>
+-	x86 ISA needed: i486, 586, 686, SSE, SSE2, SSE3, SSSE3, SSE4_1, SSE4_2, AVX, AVX2, AVX512F, AVX512CD, AVX512ER, AVX512PF, AVX512VL
++	x86 ISA used: CMOV, SSE, SSE2, SSE3, SSSE3, SSE4_1, SSE4_2, AVX, AVX2, FMA, AVX512F, AVX512CD, AVX512ER, AVX512PF, AVX512VL, AVX512DQ, AVX512BW, AVX512_4FMAPS, AVX512_4VNNIW, AVX512_BITALG, AVX512_IFMA, AVX512_VBMI, AVX512_VBMI2, AVX512_VNNI, AVX512_BF16, <unknown: 2000000>, <unknown: 4000000>, <unknown: 8000000>, <unknown: 10000000>, <unknown: 20000000>, <unknown: 40000000>
++	x86 ISA needed: CMOV, SSE, SSE2, SSE3, SSSE3, SSE4_1, SSE4_2, AVX, AVX2, FMA, AVX512F, AVX512CD, AVX512ER, AVX512PF, AVX512VL, AVX512DQ
++  GNU                  0x00000018	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA used: <None>
++	x86 feature used: x86
+diff -rup binutils.orig/binutils/testsuite/binutils-all/i386/pr21231b.s binutils-2.30/binutils/testsuite/binutils-all/i386/pr21231b.s
+--- binutils.orig/binutils/testsuite/binutils-all/i386/pr21231b.s	2020-04-07 11:32:17.248776609 +0100
++++ binutils-2.30/binutils/testsuite/binutils-all/i386/pr21231b.s	2020-04-07 13:34:03.902784067 +0100
+@@ -19,14 +19,14 @@
+ 	.long 0			/* pr_datasz.  */
+ 	.p2align 2
+ 	/* GNU_PROPERTY_X86_ISA_1_USED */
+-	.long 0xc0000000	/* pr_type.  */
++	.long 0xc0010000	/* pr_type.  */
+ 	.long 4f - 3f		/* pr_datasz.  */
+ 3:
+-	.long -1
++	.long 0x7fffffff
+ 4:
+ 	.p2align 2
+ 	/* GNU_PROPERTY_X86_ISA_1_NEEDED */
+-	.long 0xc0000001	/* pr_type.  */
++	.long 0xc0008000	/* pr_type.  */
+ 	.long 4f - 3f		/* pr_datasz.  */
+ 3:
+ 	.long 0xffff
+diff -rup binutils.orig/binutils/testsuite/binutils-all/x86-64/empty-x32.d binutils-2.30/binutils/testsuite/binutils-all/x86-64/empty-x32.d
+--- binutils.orig/binutils/testsuite/binutils-all/x86-64/empty-x32.d	2020-04-07 11:32:17.250776595 +0100
++++ binutils-2.30/binutils/testsuite/binutils-all/x86-64/empty-x32.d	2020-04-07 13:34:03.902784067 +0100
+@@ -7,4 +7,4 @@
+ Displaying notes found in: .note.gnu.property
+   Owner                 Data size	Description
+   GNU                  0x0000000c	NT_GNU_PROPERTY_TYPE_0
+-      Properties: x86 feature: 
++      Properties: x86 feature: <None>
+diff -rup binutils.orig/binutils/testsuite/binutils-all/x86-64/empty.d binutils-2.30/binutils/testsuite/binutils-all/x86-64/empty.d
+--- binutils.orig/binutils/testsuite/binutils-all/x86-64/empty.d	2020-04-07 11:32:17.250776595 +0100
++++ binutils-2.30/binutils/testsuite/binutils-all/x86-64/empty.d	2020-04-07 13:34:03.902784067 +0100
+@@ -6,4 +6,4 @@
+ Displaying notes found in: .note.gnu.property
+   Owner                 Data size	Description
+   GNU                  0x00000010	NT_GNU_PROPERTY_TYPE_0
+-      Properties: x86 feature: 
++      Properties: x86 feature: <None>
+diff -rup binutils.orig/binutils/testsuite/binutils-all/x86-64/pr21231b.d binutils-2.30/binutils/testsuite/binutils-all/x86-64/pr21231b.d
+--- binutils.orig/binutils/testsuite/binutils-all/x86-64/pr21231b.d	2020-04-07 11:32:17.250776595 +0100
++++ binutils-2.30/binutils/testsuite/binutils-all/x86-64/pr21231b.d	2020-04-07 13:34:03.902784067 +0100
+@@ -1,5 +1,5 @@
+ #PROG: objcopy
+-#as: --64
++#as: --64 -mx86-used-note=yes
+ #objcopy:
+ #readelf: -n
+ 
+@@ -8,5 +8,8 @@ Displaying notes found in: .note.gnu.pro
+   GNU                  0x00000038	NT_GNU_PROPERTY_TYPE_0
+       Properties: stack size: 0x800000
+ 	no copy on protected 
+-	x86 ISA used: i486, 586, 686, SSE, SSE2, SSE3, SSSE3, SSE4_1, SSE4_2, AVX, AVX2, AVX512F, AVX512CD, AVX512ER, AVX512PF, AVX512VL, AVX512DQ, AVX512BW, <unknown: 40000>, <unknown: 80000>, <unknown: 100000>, <unknown: 200000>, <unknown: 400000>, <unknown: 800000>, <unknown: 1000000>, <unknown: 2000000>, <unknown: 4000000>, <unknown: 8000000>, <unknown: 10000000>, <unknown: 20000000>, <unknown: 40000000>, <unknown: 80000000>
+-	x86 ISA needed: i486, 586, 686, SSE, SSE2, SSE3, SSSE3, SSE4_1, SSE4_2, AVX, AVX2, AVX512F, AVX512CD, AVX512ER, AVX512PF, AVX512VL
++	x86 ISA used: CMOV, SSE, SSE2, SSE3, SSSE3, SSE4_1, SSE4_2, AVX, AVX2, FMA, AVX512F, AVX512CD, AVX512ER, AVX512PF, AVX512VL, AVX512DQ, AVX512BW, AVX512_4FMAPS, AVX512_4VNNIW, AVX512_BITALG, AVX512_IFMA, AVX512_VBMI, AVX512_VBMI2, AVX512_VNNI, AVX512_BF16, <unknown: 2000000>, <unknown: 4000000>, <unknown: 8000000>, <unknown: 10000000>, <unknown: 20000000>, <unknown: 40000000>
++	x86 ISA needed: CMOV, SSE, SSE2, SSE3, SSSE3, SSE4_1, SSE4_2, AVX, AVX2, FMA, AVX512F, AVX512CD, AVX512ER, AVX512PF, AVX512VL, AVX512DQ
++  GNU                  0x00000020	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA used: <None>
++	x86 feature used: x86
+diff -rup binutils.orig/binutils/testsuite/binutils-all/x86-64/pr21231b.s binutils-2.30/binutils/testsuite/binutils-all/x86-64/pr21231b.s
+--- binutils.orig/binutils/testsuite/binutils-all/x86-64/pr21231b.s	2020-04-07 11:32:17.250776595 +0100
++++ binutils-2.30/binutils/testsuite/binutils-all/x86-64/pr21231b.s	2020-04-07 13:34:03.902784067 +0100
+@@ -19,14 +19,14 @@
+ 	.long 0			/* pr_datasz.  */
+ 	.p2align 3
+ 	/* GNU_PROPERTY_X86_ISA_1_USED */
+-	.long 0xc0000000	/* pr_type.  */
++	.long 0xc0010000	/* pr_type.  */
+ 	.long 4f - 3f		/* pr_datasz.  */
+ 3:
+-	.long -1
++	.long 0x7fffffff
+ 4:
+ 	.p2align 3
+ 	/* GNU_PROPERTY_X86_ISA_1_NEEDED */
+-	.long 0xc0000001	/* pr_type.  */
++	.long 0xc0008000	/* pr_type.  */
+ 	.long 4f - 3f		/* pr_datasz.  */
+ 3:
+ 	.long 0xffff
+diff -rup binutils.orig/gas/config/tc-i386.c binutils-2.30/gas/config/tc-i386.c
+--- binutils.orig/gas/config/tc-i386.c	2020-04-07 11:32:17.528774573 +0100
++++ binutils-2.30/gas/config/tc-i386.c	2020-04-07 13:36:05.123911315 +0100
+@@ -191,6 +191,13 @@ static void s_bss (int);
+ #endif
+ #if defined (OBJ_ELF) || defined (OBJ_MAYBE_ELF)
+ static void handle_large_common (int small ATTRIBUTE_UNUSED);
++
++/* GNU_PROPERTY_X86_ISA_1_USED.  */
++static unsigned int x86_isa_1_used;
++/* GNU_PROPERTY_X86_FEATURE_2_USED.  */
++static unsigned int x86_feature_2_used;
++/* Generate x86 used ISA and feature properties.  */
++static unsigned int x86_used_note = DEFAULT_X86_USED_NOTE;
+ #endif
+ 
+ static const char *default_arch = DEFAULT_ARCH;
+@@ -7421,6 +7428,127 @@ encoding_length (const fragS *start_frag
+   return len - start_off + (frag_now_ptr - frag_now->fr_literal);
+ }
+ 
++#if defined (OBJ_ELF) || defined (OBJ_MAYBE_ELF)
++void
++x86_cleanup (void)
++{
++  char *p;
++  asection *seg = now_seg;
++  subsegT subseg = now_subseg;
++  asection *sec;
++  unsigned int alignment, align_size_1;
++  unsigned int isa_1_descsz, feature_2_descsz, descsz;
++  unsigned int isa_1_descsz_raw, feature_2_descsz_raw;
++  unsigned int padding;
++
++  if (!IS_ELF || !x86_used_note)
++    return;
++
++  x86_feature_2_used |= GNU_PROPERTY_X86_FEATURE_2_X86;
++
++  /* The .note.gnu.property section layout:
++
++     Field	Length		Contents
++     ----	----		----
++     n_namsz	4		4
++     n_descsz	4		The note descriptor size
++     n_type	4		NT_GNU_PROPERTY_TYPE_0
++     n_name	4		"GNU"
++     n_desc	n_descsz	The program property array
++     ....	....		....
++   */
++
++  /* Create the .note.gnu.property section.  */
++  sec = subseg_new (NOTE_GNU_PROPERTY_SECTION_NAME, 0);
++  bfd_set_section_flags (stdoutput, sec,
++			 (SEC_ALLOC
++			  | SEC_LOAD
++			  | SEC_DATA
++			  | SEC_HAS_CONTENTS
++			  | SEC_READONLY));
++
++  if (get_elf_backend_data (stdoutput)->s->elfclass == ELFCLASS64)
++    {
++      align_size_1 = 7;
++      alignment = 3;
++    }
++  else
++    {
++      align_size_1 = 3;
++      alignment = 2;
++    }
++
++  bfd_set_section_alignment (stdoutput, sec, alignment);
++  elf_section_type (sec) = SHT_NOTE;
++
++  /* GNU_PROPERTY_X86_ISA_1_USED: 4-byte type + 4-byte data size
++				  + 4-byte data  */
++  isa_1_descsz_raw = 4 + 4 + 4;
++  /* Align GNU_PROPERTY_X86_ISA_1_USED.  */
++  isa_1_descsz = (isa_1_descsz_raw + align_size_1) & ~align_size_1;
++
++  feature_2_descsz_raw = isa_1_descsz;
++  /* GNU_PROPERTY_X86_FEATURE_2_USED: 4-byte type + 4-byte data size
++				      + 4-byte data  */
++  feature_2_descsz_raw += 4 + 4 + 4;
++  /* Align GNU_PROPERTY_X86_FEATURE_2_USED.  */
++  feature_2_descsz = ((feature_2_descsz_raw + align_size_1)
++		      & ~align_size_1);
++
++  descsz = feature_2_descsz;
++  /* Section size: n_namsz + n_descsz + n_type + n_name + n_descsz.  */
++  p = frag_more (4 + 4 + 4 + 4 + descsz);
++
++  /* Write n_namsz.  */
++  md_number_to_chars (p, (valueT) 4, 4);
++
++  /* Write n_descsz.  */
++  md_number_to_chars (p + 4, (valueT) descsz, 4);
++
++  /* Write n_type.  */
++  md_number_to_chars (p + 4 * 2, (valueT) NT_GNU_PROPERTY_TYPE_0, 4);
++
++  /* Write n_name.  */
++  memcpy (p + 4 * 3, "GNU", 4);
++
++  /* Write 4-byte type.  */
++  md_number_to_chars (p + 4 * 4,
++		      (valueT) GNU_PROPERTY_X86_ISA_1_USED, 4);
++
++  /* Write 4-byte data size.  */
++  md_number_to_chars (p + 4 * 5, (valueT) 4, 4);
++
++  /* Write 4-byte data.  */
++  md_number_to_chars (p + 4 * 6, (valueT) x86_isa_1_used, 4);
++
++  /* Zero out paddings.  */
++  padding = isa_1_descsz - isa_1_descsz_raw;
++  if (padding)
++    memset (p + 4 * 7, 0, padding);
++
++  /* Write 4-byte type.  */
++  md_number_to_chars (p + isa_1_descsz + 4 * 4,
++		      (valueT) GNU_PROPERTY_X86_FEATURE_2_USED, 4);
++
++  /* Write 4-byte data size.  */
++  md_number_to_chars (p + isa_1_descsz + 4 * 5, (valueT) 4, 4);
++
++  /* Write 4-byte data.  */
++  md_number_to_chars (p + isa_1_descsz + 4 * 6,
++		      (valueT) x86_feature_2_used, 4);
++
++  /* Zero out paddings.  */
++  padding = feature_2_descsz - feature_2_descsz_raw;
++  if (padding)
++    memset (p + isa_1_descsz + 4 * 7, 0, padding);
++
++  /* We probably can't restore the current segment, for there likely
++     isn't one yet...  */
++  if (seg && subseg)
++    subseg_set (seg, subseg);
++}
++#endif
++
+ static void
+ output_insn (void)
+ {
+@@ -7429,6 +7557,99 @@ output_insn (void)
+   fragS *fragP = NULL;
+   enum align_branch_kind branch = align_branch_none;
+ 
++#if defined (OBJ_ELF) || defined (OBJ_MAYBE_ELF)
++  if (IS_ELF && x86_used_note)
++    {
++#if 0
++      if (i.tm.cpu_flags.bitfield.cpucmov)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_CMOV;
++#endif
++      if (i.tm.cpu_flags.bitfield.cpusse)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_SSE;
++      if (i.tm.cpu_flags.bitfield.cpusse2)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_SSE2;
++      if (i.tm.cpu_flags.bitfield.cpusse3)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_SSE3;
++      if (i.tm.cpu_flags.bitfield.cpussse3)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_SSSE3;
++      if (i.tm.cpu_flags.bitfield.cpusse4_1)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_SSE4_1;
++      if (i.tm.cpu_flags.bitfield.cpusse4_2)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_SSE4_2;
++      if (i.tm.cpu_flags.bitfield.cpuavx)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_AVX;
++      if (i.tm.cpu_flags.bitfield.cpuavx2)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_AVX2;
++      if (i.tm.cpu_flags.bitfield.cpufma)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_FMA;
++      if (i.tm.cpu_flags.bitfield.cpuavx512f)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_AVX512F;
++      if (i.tm.cpu_flags.bitfield.cpuavx512cd)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_AVX512CD;
++      if (i.tm.cpu_flags.bitfield.cpuavx512er)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_AVX512ER;
++      if (i.tm.cpu_flags.bitfield.cpuavx512pf)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_AVX512PF;
++      if (i.tm.cpu_flags.bitfield.cpuavx512vl)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_AVX512VL;
++      if (i.tm.cpu_flags.bitfield.cpuavx512dq)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_AVX512DQ;
++      if (i.tm.cpu_flags.bitfield.cpuavx512bw)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_AVX512BW;
++      if (i.tm.cpu_flags.bitfield.cpuavx512_4fmaps)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_AVX512_4FMAPS;
++      if (i.tm.cpu_flags.bitfield.cpuavx512_4vnniw)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_AVX512_4VNNIW;
++      if (i.tm.cpu_flags.bitfield.cpuavx512_bitalg)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_AVX512_BITALG;
++      if (i.tm.cpu_flags.bitfield.cpuavx512ifma)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_AVX512_IFMA;
++      if (i.tm.cpu_flags.bitfield.cpuavx512vbmi)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_AVX512_VBMI;
++      if (i.tm.cpu_flags.bitfield.cpuavx512_vbmi2)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_AVX512_VBMI2;
++      if (i.tm.cpu_flags.bitfield.cpuavx512_vnni)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_AVX512_VNNI;
++#if 0
++      if (i.tm.cpu_flags.bitfield.cpuavx512_bf16)
++	x86_isa_1_used |= GNU_PROPERTY_X86_ISA_1_AVX512_BF16;
++#endif
++
++      if (i.tm.cpu_flags.bitfield.cpu8087
++	  || i.tm.cpu_flags.bitfield.cpu287
++	  || i.tm.cpu_flags.bitfield.cpu387
++	  || i.tm.cpu_flags.bitfield.cpu687
++	  || i.tm.cpu_flags.bitfield.cpufisttp)
++	x86_feature_2_used |= GNU_PROPERTY_X86_FEATURE_2_X87;
++#if 0
++      /* Don't set GNU_PROPERTY_X86_FEATURE_2_MMX for prefetchtXXX nor
++	 Xfence instructions.  */
++      if (i.tm.base_opcode != 0xf18
++	  && i.tm.base_opcode != 0xf0d
++	  && i.tm.base_opcode != 0xfae
++	  && (i.has_regmmx
++	      || i.tm.cpu_flags.bitfield.cpummx
++	      || i.tm.cpu_flags.bitfield.cpua3dnow
++	      || i.tm.cpu_flags.bitfield.cpua3dnowa))
++	x86_feature_2_used |= GNU_PROPERTY_X86_FEATURE_2_MMX;
++      if (i.has_regxmm)
++	x86_feature_2_used |= GNU_PROPERTY_X86_FEATURE_2_XMM;
++      if (i.has_regymm)
++	x86_feature_2_used |= GNU_PROPERTY_X86_FEATURE_2_YMM;
++      if (i.has_regzmm)
++	x86_feature_2_used |= GNU_PROPERTY_X86_FEATURE_2_ZMM;
++      if (i.tm.cpu_flags.bitfield.cpufxsr)
++	x86_feature_2_used |= GNU_PROPERTY_X86_FEATURE_2_FXSR;
++#endif
++      if (i.tm.cpu_flags.bitfield.cpuxsave)
++	x86_feature_2_used |= GNU_PROPERTY_X86_FEATURE_2_XSAVE;
++      if (i.tm.cpu_flags.bitfield.cpuxsaveopt)
++	x86_feature_2_used |= GNU_PROPERTY_X86_FEATURE_2_XSAVEOPT;
++      if (i.tm.cpu_flags.bitfield.cpuxsavec)
++	x86_feature_2_used |= GNU_PROPERTY_X86_FEATURE_2_XSAVEC;
++    }
++#endif
++
+   /* Tie dwarf2 debug info to the address at the start of the insn.
+      We can't do this after the insn has been output as the current
+      frag may have been closed off.  eg. by frag_var.  */
+@@ -10829,6 +11050,7 @@ const char *md_shortopts = "qn";
+ #define OPTION_MALIGN_BRANCH_PREFIX_SIZE (OPTION_MD_BASE + 28)
+ #define OPTION_MALIGN_BRANCH (OPTION_MD_BASE + 29)
+ #define OPTION_MBRANCHES_WITH_32B_BOUNDARIES (OPTION_MD_BASE + 30)
++#define OPTION_X86_USED_NOTE (OPTION_MD_BASE + 31)
+ 
+ struct option md_longopts[] =
+ {
+@@ -10840,6 +11062,7 @@ struct option md_longopts[] =
+ #if defined (OBJ_ELF) || defined (OBJ_MAYBE_ELF)
+   {"x32", no_argument, NULL, OPTION_X32},
+   {"mshared", no_argument, NULL, OPTION_MSHARED},
++  {"mx86-used-note", required_argument, NULL, OPTION_X86_USED_NOTE},
+ #endif
+   {"divide", no_argument, NULL, OPTION_DIVIDE},
+   {"march", required_argument, NULL, OPTION_MARCH},
+@@ -10957,6 +11180,15 @@ md_parse_option (int c, const char *arg)
+       else
+ 	as_fatal (_("32bit x86_64 is only supported for ELF"));
+       break;
++
++    case OPTION_X86_USED_NOTE:
++      if (strcasecmp (arg, "yes") == 0)
++        x86_used_note = 1;
++      else if (strcasecmp (arg, "no") == 0)
++        x86_used_note = 0;
++      else
++        as_fatal (_("invalid -mx86-used-note= option: `%s'"), arg);
++      break;
+ #endif
+ 
+     case OPTION_32:
+@@ -11448,6 +11680,14 @@ md_show_usage (FILE *stream)
+ #if defined (OBJ_ELF) || defined (OBJ_MAYBE_ELF)
+   fprintf (stream, _("\
+   -s                      ignored\n"));
++  fprintf (stream, _("\
++  -mx86-used-note=[no|yes] "));
++  if (DEFAULT_X86_USED_NOTE)
++    fprintf (stream, _("(default: yes)\n"));
++  else
++    fprintf (stream, _("(default: no)\n"));
++  fprintf (stream, _("\
++                          generate x86 used ISA and feature properties\n"));
+ #endif
+ #if (defined (OBJ_ELF) || defined (OBJ_MAYBE_ELF) \
+      || defined (TE_PE) || defined (TE_PEP))
+diff -rup binutils.orig/gas/config/tc-i386.h binutils-2.30/gas/config/tc-i386.h
+--- binutils.orig/gas/config/tc-i386.h	2020-04-07 11:32:17.526774588 +0100
++++ binutils-2.30/gas/config/tc-i386.h	2020-04-07 13:34:03.904784053 +0100
+@@ -346,6 +346,11 @@ extern bfd_vma x86_64_section_letter (in
+ #define md_elf_section_letter(LETTER, PTR_MSG)	x86_64_section_letter (LETTER, PTR_MSG)
+ #define md_elf_section_word(STR, LEN)		x86_64_section_word (STR, LEN)
+ 
++#if defined (OBJ_ELF) || defined (OBJ_MAYBE_ELF)
++extern void x86_cleanup (void);
++#define md_cleanup() x86_cleanup ()
++#endif
++
+ #ifdef TE_PE
+ 
+ #define O_secrel O_md1
+diff -rup binutils.orig/gas/config.in binutils-2.30/gas/config.in
+--- binutils.orig/gas/config.in	2020-04-07 11:32:17.532774544 +0100
++++ binutils-2.30/gas/config.in	2020-04-07 13:34:03.904784053 +0100
+@@ -50,6 +50,10 @@
+ /* Define to 1 if you want to generate x86 relax relocations by default. */
+ #undef DEFAULT_GENERATE_X86_RELAX_RELOCATIONS
+ 
++/* Define to 1 if you want to generate GNU x86 used ISA and feature properties
++   by default. */
++#undef DEFAULT_X86_USED_NOTE
++
+ /* Supported emulations. */
+ #undef EMULATIONS
+ 
+diff -rup binutils.orig/gas/configure binutils-2.30/gas/configure
+--- binutils.orig/gas/configure	2020-04-07 11:32:17.519774639 +0100
++++ binutils-2.30/gas/configure	2020-04-07 13:34:03.905784046 +0100
+@@ -772,6 +772,7 @@ enable_compressed_debug_sections
+ enable_x86_relax_relocations
+ enable_elf_stt_common
+ enable_generate_build_notes
++enable_x86_used_note
+ enable_werror
+ enable_build_warnings
+ with_cpu
+@@ -11788,6 +11789,18 @@ if test "${enable_generate_build_notes+s
+ esac
+ fi
+ 
++# Decide if the x86 ELF assembler should default to generating GNU x86
++# used ISA and feature properties.
++ac_default_generate_x86_used_note=unset
++# Provide a configuration option to override the default.
++# Check whether --enable-x86-used-note was given.
++if test "${enable_x86_used_note+set}" = set; then :
++  enableval=$enable_x86_used_note; case "${enableval}" in
++  yes)  ac_default_generate_x86_used_note=1 ;;
++  no)   ac_default_generate_x86_used_note=0 ;;
++esac
++fi
++
+ 
+ using_cgen=no
+ 
+@@ -12736,6 +12749,14 @@ cat >>confdefs.h <<_ACEOF
+ #define DEFAULT_GENERATE_BUILD_NOTES $ac_default_generate_build_notes
+ _ACEOF
+ 
++if test ${ac_default_generate_x86_used_note} = unset; then
++  ac_default_generate_x86_used_note=0
++fi
++
++cat >>confdefs.h <<_ACEOF
++#define DEFAULT_X86_USED_NOTE $ac_default_generate_x86_used_note
++_ACEOF
++
+ 
+ if test x$ac_default_compressed_debug_sections = xyes ; then
+ 
+diff -rup binutils.orig/gas/configure.ac binutils-2.30/gas/configure.ac
+--- binutils.orig/gas/configure.ac	2020-04-07 11:32:17.533774537 +0100
++++ binutils-2.30/gas/configure.ac	2020-04-07 13:34:03.905784046 +0100
+@@ -113,6 +113,17 @@ AC_ARG_ENABLE(generate_build_notes,
+   no)   ac_default_generate_build_notes=0 ;;
+ esac])dnl
+ 
++# Decide if the x86 ELF assembler should default to generating GNU x86
++# used ISA and feature properties.
++ac_default_generate_x86_used_note=unset
++# Provide a configuration option to override the default.
++AC_ARG_ENABLE(x86-used-note,
++	      AS_HELP_STRING([--enable-x86-used-note],
++	      [generate GNU x86 used ISA and feature properties]),
++[case "${enableval}" in
++  yes)  ac_default_generate_x86_used_note=1 ;;
++  no)   ac_default_generate_x86_used_note=0 ;;
++esac])dnl
+ 
+ using_cgen=no
+ 
+@@ -629,6 +640,25 @@ AC_DEFINE_UNQUOTED(DEFAULT_GENERATE_BUIL
+   [Define to 1 if you want to generate GNU Build attribute notes
+    by default, if none are contained in the input.])
+ 
++if test ${ac_default_generate_x86_used_note} = unset; then
++  ac_default_generate_x86_used_note=0
++fi
++AC_DEFINE_UNQUOTED(DEFAULT_X86_USED_NOTE,
++  $ac_default_generate_x86_used_note,
++  [Define to 1 if you want to generate GNU x86 used ISA and feature
++   properties by default.])
++
++if test ${ac_default_generate_riscv_attr} = unset; then
++    case ${target_os} in
++      elf)
++	ac_default_generate_riscv_attr=1
++	;;
++      *)
++	ac_default_generate_riscv_attr=0
++	;;
++  esac
++fi
++
+ if test x$ac_default_compressed_debug_sections = xyes ; then
+   AC_DEFINE(DEFAULT_FLAG_COMPRESS_DEBUG, 1, [Define if you want compressed debug sections by default.])
+ fi
+diff -rup binutils.orig/gas/testsuite/gas/i386/i386.exp binutils-2.30/gas/testsuite/gas/i386/i386.exp
+--- binutils.orig/gas/testsuite/gas/i386/i386.exp	2020-04-07 11:32:17.596774079 +0100
++++ binutils-2.30/gas/testsuite/gas/i386/i386.exp	2020-04-07 13:34:03.906784038 +0100
+@@ -507,6 +507,9 @@ if [expr ([istarget "i*86-*-*"] ||  [ist
+ 	    run_dump_test "align-branch-3"
+ 	}
+ 
++	run_dump_test "property-1"
++	# run_dump_test "property-2"
++
+ 	if { [gas_64_check] } then {
+ 	    run_dump_test "att-regs"
+ 	    run_dump_test "intel-regs"
+diff -rup binutils.orig/include/bfdlink.h binutils-2.30/include/bfdlink.h
+--- binutils.orig/include/bfdlink.h	2020-04-07 11:32:17.506774733 +0100
++++ binutils-2.30/include/bfdlink.h	2020-04-07 13:34:03.906784038 +0100
+@@ -489,6 +489,9 @@ struct bfd_link_info
+   /* TRUE if GNU_PROPERTY_X86_FEATURE_1_SHSTK should be generated.  */
+   unsigned int shstk: 1;
+ 
++  /* 0 = > no report, 1 => warn, 2=> error.  */
++  unsigned int cet_report: 2;
++
+   /* TRUE if generation of .interp/PT_INTERP should be suppressed.  */
+   unsigned int nointerp: 1;
+ 
+diff -rup binutils.orig/include/elf/common.h binutils-2.30/include/elf/common.h
+--- binutils.orig/include/elf/common.h	2020-04-07 11:32:17.511774697 +0100
++++ binutils-2.30/include/elf/common.h	2020-04-07 13:34:03.906784038 +0100
+@@ -460,6 +460,7 @@
+ #define PT_SUNW_EH_FRAME PT_GNU_EH_FRAME      /* Solaris uses the same value */
+ #define PT_GNU_STACK	(PT_LOOS + 0x474e551) /* Stack flags */
+ #define PT_GNU_RELRO	(PT_LOOS + 0x474e552) /* Read-only after relocation */
++#define PT_GNU_PROPERTY	(PT_LOOS + 0x474e553) /* GNU property */
+ 
+ /* Mbind segments */
+ #define PT_GNU_MBIND_NUM 4096
+@@ -740,31 +741,96 @@
+ /* Application-specific semantics, hi */
+ #define GNU_PROPERTY_HIUSER  0xffffffff
+ 
+-#define GNU_PROPERTY_X86_ISA_1_USED		0xc0000000
+-#define GNU_PROPERTY_X86_ISA_1_NEEDED		0xc0000001
+-#define GNU_PROPERTY_X86_FEATURE_1_AND		0xc0000002
+-
+-#define GNU_PROPERTY_X86_ISA_1_486           (1U << 0)
+-#define GNU_PROPERTY_X86_ISA_1_586           (1U << 1)
+-#define GNU_PROPERTY_X86_ISA_1_686           (1U << 2)
+-#define GNU_PROPERTY_X86_ISA_1_SSE           (1U << 3)
+-#define GNU_PROPERTY_X86_ISA_1_SSE2          (1U << 4)
+-#define GNU_PROPERTY_X86_ISA_1_SSE3          (1U << 5)
+-#define GNU_PROPERTY_X86_ISA_1_SSSE3         (1U << 6)
+-#define GNU_PROPERTY_X86_ISA_1_SSE4_1        (1U << 7)
+-#define GNU_PROPERTY_X86_ISA_1_SSE4_2        (1U << 8)
+-#define GNU_PROPERTY_X86_ISA_1_AVX           (1U << 9)
+-#define GNU_PROPERTY_X86_ISA_1_AVX2          (1U << 10)
+-#define GNU_PROPERTY_X86_ISA_1_AVX512F       (1U << 11)
+-#define GNU_PROPERTY_X86_ISA_1_AVX512CD      (1U << 12)
+-#define GNU_PROPERTY_X86_ISA_1_AVX512ER      (1U << 13)
+-#define GNU_PROPERTY_X86_ISA_1_AVX512PF      (1U << 14)
+-#define GNU_PROPERTY_X86_ISA_1_AVX512VL      (1U << 15)
+-#define GNU_PROPERTY_X86_ISA_1_AVX512DQ      (1U << 16)
+-#define GNU_PROPERTY_X86_ISA_1_AVX512BW      (1U << 17)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_USED	0xc0000000
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_NEEDED	0xc0000001
+ 
+-#define GNU_PROPERTY_X86_FEATURE_1_IBT       (1U << 0)
+-#define GNU_PROPERTY_X86_FEATURE_1_SHSTK     (1U << 1)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_486	(1U << 0)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_586	(1U << 1)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_686	(1U << 2)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_SSE	(1U << 3)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_SSE2	(1U << 4)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_SSE3	(1U << 5)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_SSSE3	(1U << 6)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_SSE4_1	(1U << 7)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_SSE4_2	(1U << 8)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_AVX	(1U << 9)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_AVX2	(1U << 10)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_AVX512F	(1U << 11)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_AVX512CD	(1U << 12)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_AVX512ER	(1U << 13)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_AVX512PF	(1U << 14)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_AVX512VL	(1U << 15)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_AVX512DQ	(1U << 16)
++#define GNU_PROPERTY_X86_COMPAT_ISA_1_AVX512BW	(1U << 17)
++
++/* A 4-byte unsigned integer property: A bit is set if it is set in all
++   relocatable inputs.  */
++#define GNU_PROPERTY_X86_UINT32_AND_LO		0xc0000002
++#define GNU_PROPERTY_X86_UINT32_AND_HI		0xc0007fff
++
++/* A 4-byte unsigned integer property: A bit is set if it is set in any
++   relocatable inputs.  */
++#define GNU_PROPERTY_X86_UINT32_OR_LO		0xc0008000
++#define GNU_PROPERTY_X86_UINT32_OR_HI		0xc000ffff
++
++/* A 4-byte unsigned integer property: A bit is set if it is set in any
++   relocatable inputs and the property is present in all relocatable
++   inputs.  */
++#define GNU_PROPERTY_X86_UINT32_OR_AND_LO	0xc0010000
++#define GNU_PROPERTY_X86_UINT32_OR_AND_HI	0xc0017fff
++
++#define GNU_PROPERTY_X86_FEATURE_1_AND \
++  (GNU_PROPERTY_X86_UINT32_AND_LO + 0)
++
++#define GNU_PROPERTY_X86_ISA_1_NEEDED \
++  (GNU_PROPERTY_X86_UINT32_OR_LO + 0)
++#define GNU_PROPERTY_X86_FEATURE_2_NEEDED \
++  (GNU_PROPERTY_X86_UINT32_OR_LO + 1)
++
++#define GNU_PROPERTY_X86_ISA_1_USED \
++  (GNU_PROPERTY_X86_UINT32_OR_AND_LO + 0)
++#define GNU_PROPERTY_X86_FEATURE_2_USED \
++  (GNU_PROPERTY_X86_UINT32_OR_AND_LO + 1)
++
++#define GNU_PROPERTY_X86_FEATURE_1_IBT		(1U << 0)
++#define GNU_PROPERTY_X86_FEATURE_1_SHSTK	(1U << 1)
++
++#define GNU_PROPERTY_X86_ISA_1_CMOV		(1U << 0)
++#define GNU_PROPERTY_X86_ISA_1_SSE		(1U << 1)
++#define GNU_PROPERTY_X86_ISA_1_SSE2		(1U << 2)
++#define GNU_PROPERTY_X86_ISA_1_SSE3		(1U << 3)
++#define GNU_PROPERTY_X86_ISA_1_SSSE3		(1U << 4)
++#define GNU_PROPERTY_X86_ISA_1_SSE4_1		(1U << 5)
++#define GNU_PROPERTY_X86_ISA_1_SSE4_2		(1U << 6)
++#define GNU_PROPERTY_X86_ISA_1_AVX		(1U << 7)
++#define GNU_PROPERTY_X86_ISA_1_AVX2		(1U << 8)
++#define GNU_PROPERTY_X86_ISA_1_FMA		(1U << 9)
++#define GNU_PROPERTY_X86_ISA_1_AVX512F		(1U << 10)
++#define GNU_PROPERTY_X86_ISA_1_AVX512CD		(1U << 11)
++#define GNU_PROPERTY_X86_ISA_1_AVX512ER		(1U << 12)
++#define GNU_PROPERTY_X86_ISA_1_AVX512PF		(1U << 13)
++#define GNU_PROPERTY_X86_ISA_1_AVX512VL		(1U << 14)
++#define GNU_PROPERTY_X86_ISA_1_AVX512DQ		(1U << 15)
++#define GNU_PROPERTY_X86_ISA_1_AVX512BW		(1U << 16)
++#define GNU_PROPERTY_X86_ISA_1_AVX512_4FMAPS	(1U << 17)
++#define GNU_PROPERTY_X86_ISA_1_AVX512_4VNNIW	(1U << 18)
++#define GNU_PROPERTY_X86_ISA_1_AVX512_BITALG	(1U << 19)
++#define GNU_PROPERTY_X86_ISA_1_AVX512_IFMA	(1U << 20)
++#define GNU_PROPERTY_X86_ISA_1_AVX512_VBMI	(1U << 21)
++#define GNU_PROPERTY_X86_ISA_1_AVX512_VBMI2	(1U << 22)
++#define GNU_PROPERTY_X86_ISA_1_AVX512_VNNI	(1U << 23)
++#define GNU_PROPERTY_X86_ISA_1_AVX512_BF16	(1U << 24)
++
++#define GNU_PROPERTY_X86_FEATURE_2_X86		(1U << 0)
++#define GNU_PROPERTY_X86_FEATURE_2_X87		(1U << 1)
++#define GNU_PROPERTY_X86_FEATURE_2_MMX		(1U << 2)
++#define GNU_PROPERTY_X86_FEATURE_2_XMM		(1U << 3)
++#define GNU_PROPERTY_X86_FEATURE_2_YMM		(1U << 4)
++#define GNU_PROPERTY_X86_FEATURE_2_ZMM		(1U << 5)
++#define GNU_PROPERTY_X86_FEATURE_2_FXSR		(1U << 6)
++#define GNU_PROPERTY_X86_FEATURE_2_XSAVE	(1U << 7)
++#define GNU_PROPERTY_X86_FEATURE_2_XSAVEOPT	(1U << 8)
++#define GNU_PROPERTY_X86_FEATURE_2_XSAVEC	(1U << 9)
+ 
+ /* Values used in GNU .note.ABI-tag notes (NT_GNU_ABI_TAG).  */
+ #define GNU_ABI_TAG_LINUX	0
+diff -rup binutils.orig/ld/emulparams/cet.sh binutils-2.30/ld/emulparams/cet.sh
+--- binutils.orig/ld/emulparams/cet.sh	2020-04-07 11:32:17.320776086 +0100
++++ binutils-2.30/ld/emulparams/cet.sh	2020-04-07 13:34:03.907784031 +0100
+@@ -2,7 +2,8 @@ PARSE_AND_LIST_OPTIONS_CET='
+   fprintf (file, _("\
+   -z ibtplt                   Generate IBT-enabled PLT entries\n\
+   -z ibt                      Generate GNU_PROPERTY_X86_FEATURE_1_IBT\n\
+-  -z shstk                    Generate GNU_PROPERTY_X86_FEATURE_1_SHSTK\n"));
++  -z shstk                    Generate GNU_PROPERTY_X86_FEATURE_1_SHSTK\n\
++  -z cet-report=[none|warning|error] (default: none)\n"));
+ '
+ PARSE_AND_LIST_ARGS_CASE_Z_CET='
+       else if (strcmp (optarg, "ibtplt") == 0)
+@@ -11,6 +12,18 @@ PARSE_AND_LIST_ARGS_CASE_Z_CET='
+ 	link_info.ibt = TRUE;
+       else if (strcmp (optarg, "shstk") == 0)
+ 	link_info.shstk = TRUE;
++      else if (strncmp (optarg, "cet-report=", 11) == 0)
++	{
++	  if (strcmp (optarg + 11, "none") == 0)
++	    link_info.cet_report = 0;
++	  else if (strcmp (optarg + 11, "warning") == 0)
++	    link_info.cet_report = 1;
++	  else if (strcmp (optarg + 11, "error") == 0)
++	    link_info.cet_report = 2;
++	  else
++	    einfo (_("%F%P: invalid option for -z cet-report=: %s\n"),
++		   optarg + 11);
++	}
+ '
+ 
+ PARSE_AND_LIST_OPTIONS="$PARSE_AND_LIST_OPTIONS $PARSE_AND_LIST_OPTIONS_CET"
+diff -rup binutils.orig/ld/testsuite/ld-elf/elf.exp binutils-2.30/ld/testsuite/ld-elf/elf.exp
+--- binutils.orig/ld/testsuite/ld-elf/elf.exp	2020-04-07 11:32:17.454775112 +0100
++++ binutils-2.30/ld/testsuite/ld-elf/elf.exp	2020-04-07 13:34:03.907784031 +0100
+@@ -101,8 +101,10 @@ proc is_elf64 { binary_file } {
+ 
+ if [is_elf64 tmpdir/symbol3w.a] {
+     set ASFLAGS "$ASFLAGS --defsym ALIGN=3"
++    set pr23900_1_exp "pr23900-1-64.rd"
+ } else {
+     set ASFLAGS "$ASFLAGS --defsym ALIGN=2"
++    set pr23900_1_exp "pr23900-1-32.rd"
+ }
+ 
+ 
+@@ -317,12 +319,36 @@ if { [check_gc_sections_available] && ![
+ if { [istarget *-*-*linux*]
+      || [istarget *-*-nacl*]
+      || [istarget *-*-gnu*] } {
+-    run_ld_link_tests {
+-	{"stack exec" "-z execstack" "" "" {stack.s}
+-	    {{readelf {-Wl} stack-exec.rd}} "stack-exec.exe"}
+-	{"stack size" "-z stack-size=0x123400" "" "" {stack.s}
+-	    {{readelf {-Wl} stack-size.rd}} "stack-size.exe"}
+-    }
++    run_ld_link_tests [list \
++	[list "stack exec" \
++	    "-z execstack" \
++	    "" \
++	    "" \
++	    {stack.s} \
++	    {{readelf {-Wl} stack-exec.rd}} \
++	    "stack-exec.exe"] \
++	[list "stack noexec" \
++	    "-z noexecstack" \
++	    "" \
++	    "" \
++	    {stack.s} \
++	    {{readelf {-Wl} stack-noexec.rd}} \
++	    "stack-noexec.exe"] \
++	[list "stack size" \
++	    "-z stack-size=0x123400" \
++	    "" \
++	    "" \
++	    {stack.s} \
++	    {{readelf {-Wl} stack-size.rd}} \
++	    "stack-size.exe"] \
++	[list "PT_GNU_PROPERTY alignment" \
++	    "" \
++	    "" \
++	    "" \
++	    {pr23900-1.s} \
++	    [list [list "readelf" {-Wl} $pr23900_1_exp]] \
++	    "pr23900-1.exe"] \
++	]
+ }
+ 
+ set LDFLAGS $old_ldflags
+diff -rup binutils.orig/ld/testsuite/ld-i386/ibt-plt-1.d binutils-2.30/ld/testsuite/ld-i386/ibt-plt-1.d
+--- binutils.orig/ld/testsuite/ld-i386/ibt-plt-1.d	2020-04-07 11:32:17.358775810 +0100
++++ binutils-2.30/ld/testsuite/ld-i386/ibt-plt-1.d	2020-04-07 13:34:03.907784031 +0100
+@@ -1,5 +1,5 @@
+ #as: --32
+-#ld: -shared -m elf_i386 --hash-style=sysv
++#ld: -shared -m elf_i386 --hash-style=sysv -z noseparate-code
+ #objdump: -dw
+ 
+ .*: +file format .*
+@@ -7,45 +7,45 @@
+ 
+ Disassembly of section .plt:
+ 
+-0+1b0 <.plt>:
++[a-f0-9]+ <.plt>:
+  +[a-f0-9]+:	ff b3 04 00 00 00    	pushl  0x4\(%ebx\)
+  +[a-f0-9]+:	ff a3 08 00 00 00    	jmp    \*0x8\(%ebx\)
+  +[a-f0-9]+:	0f 1f 40 00          	nopl   0x0\(%eax\)
+  +[a-f0-9]+:	f3 0f 1e fb          	endbr32 
+  +[a-f0-9]+:	68 00 00 00 00       	push   \$0x0
+- +[a-f0-9]+:	e9 e2 ff ff ff       	jmp    1b0 <.plt>
++ +[a-f0-9]+:	e9 e2 ff ff ff       	jmp    [a-f0-9]+ <.plt>
+  +[a-f0-9]+:	66 90                	xchg   %ax,%ax
+  +[a-f0-9]+:	f3 0f 1e fb          	endbr32 
+  +[a-f0-9]+:	68 08 00 00 00       	push   \$0x8
+- +[a-f0-9]+:	e9 d2 ff ff ff       	jmp    1b0 <.plt>
++ +[a-f0-9]+:	e9 d2 ff ff ff       	jmp    [a-f0-9]+ <.plt>
+  +[a-f0-9]+:	66 90                	xchg   %ax,%ax
+ 
+ Disassembly of section .plt.sec:
+ 
+-0+1e0 <bar1@plt>:
++[a-f0-9]+ <bar1@plt>:
+  +[a-f0-9]+:	f3 0f 1e fb          	endbr32 
+  +[a-f0-9]+:	ff a3 0c 00 00 00    	jmp    \*0xc\(%ebx\)
+  +[a-f0-9]+:	66 0f 1f 44 00 00    	nopw   0x0\(%eax,%eax,1\)
+ 
+-0+1f0 <bar2@plt>:
++[a-f0-9]+ <bar2@plt>:
+  +[a-f0-9]+:	f3 0f 1e fb          	endbr32 
+  +[a-f0-9]+:	ff a3 10 00 00 00    	jmp    \*0x10\(%ebx\)
+  +[a-f0-9]+:	66 0f 1f 44 00 00    	nopw   0x0\(%eax,%eax,1\)
+ 
+ Disassembly of section .text:
+ 
+-0+200 <foo>:
++[a-f0-9]+ <foo>:
+  +[a-f0-9]+:	53                   	push   %ebx
+- +[a-f0-9]+:	e8 18 00 00 00       	call   21e <__x86.get_pc_thunk.bx>
+- +[a-f0-9]+:	81 c3 36 11 00 00    	add    \$0x1136,%ebx
++ +[a-f0-9]+:	e8 18 00 00 00       	call   [a-f0-9]+ <__x86.get_pc_thunk.bx>
++ +[a-f0-9]+:	81 c3 ([0-9a-f]{2} ){4}[ 	]+add    \$0x[a-f0-9]+,%ebx
+  +[a-f0-9]+:	83 ec 08             	sub    \$0x8,%esp
+- +[a-f0-9]+:	e8 dc ff ff ff       	call   1f0 <bar2@plt>
+- +[a-f0-9]+:	e8 c7 ff ff ff       	call   1e0 <bar1@plt>
++ +[a-f0-9]+:	e8 dc ff ff ff       	call   [a-f0-9]+ <bar2@plt>
++ +[a-f0-9]+:	e8 c7 ff ff ff       	call   [a-f0-9]+ <bar1@plt>
+  +[a-f0-9]+:	83 c4 08             	add    \$0x8,%esp
+  +[a-f0-9]+:	5b                   	pop    %ebx
+  +[a-f0-9]+:	c3                   	ret    
+ 
+-0+21e <__x86.get_pc_thunk.bx>:
++[a-f0-9]+ <__x86.get_pc_thunk.bx>:
+  +[a-f0-9]+:	8b 1c 24             	mov    \(%esp\),%ebx
+  +[a-f0-9]+:	c3                   	ret    
+ #pass
+diff -rup binutils.orig/ld/testsuite/ld-i386/ibt-plt-2a.d binutils-2.30/ld/testsuite/ld-i386/ibt-plt-2a.d
+--- binutils.orig/ld/testsuite/ld-i386/ibt-plt-2a.d	2020-04-07 11:32:17.361775788 +0100
++++ binutils-2.30/ld/testsuite/ld-i386/ibt-plt-2a.d	2020-04-07 13:34:03.907784031 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-2.s
+ #as: --32
+-#ld: -shared -m elf_i386 -z ibtplt --hash-style=sysv
++#ld: -shared -m elf_i386 -z ibtplt --hash-style=sysv -z noseparate-code
+ #objdump: -dw
+ 
+ .*: +file format .*
+@@ -8,45 +8,45 @@
+ 
+ Disassembly of section .plt:
+ 
+-0+1b0 <.plt>:
++0+1.0 <.plt>:
+  +[a-f0-9]+:	ff b3 04 00 00 00    	pushl  0x4\(%ebx\)
+  +[a-f0-9]+:	ff a3 08 00 00 00    	jmp    \*0x8\(%ebx\)
+  +[a-f0-9]+:	0f 1f 40 00          	nopl   0x0\(%eax\)
+  +[a-f0-9]+:	f3 0f 1e fb          	endbr32 
+  +[a-f0-9]+:	68 00 00 00 00       	push   \$0x0
+- +[a-f0-9]+:	e9 e2 ff ff ff       	jmp    1b0 <.plt>
++ +[a-f0-9]+:	e9 e2 ff ff ff       	jmp    1.0 <.plt>
+  +[a-f0-9]+:	66 90                	xchg   %ax,%ax
+  +[a-f0-9]+:	f3 0f 1e fb          	endbr32 
+  +[a-f0-9]+:	68 08 00 00 00       	push   \$0x8
+- +[a-f0-9]+:	e9 d2 ff ff ff       	jmp    1b0 <.plt>
++ +[a-f0-9]+:	e9 d2 ff ff ff       	jmp    1.0 <.plt>
+  +[a-f0-9]+:	66 90                	xchg   %ax,%ax
+ 
+ Disassembly of section .plt.sec:
+ 
+-0+1e0 <bar1@plt>:
++0+1.0 <bar1@plt>:
+  +[a-f0-9]+:	f3 0f 1e fb          	endbr32 
+  +[a-f0-9]+:	ff a3 0c 00 00 00    	jmp    \*0xc\(%ebx\)
+  +[a-f0-9]+:	66 0f 1f 44 00 00    	nopw   0x0\(%eax,%eax,1\)
+ 
+-0+1f0 <bar2@plt>:
++0+1.0 <bar2@plt>:
+  +[a-f0-9]+:	f3 0f 1e fb          	endbr32 
+  +[a-f0-9]+:	ff a3 10 00 00 00    	jmp    \*0x10\(%ebx\)
+  +[a-f0-9]+:	66 0f 1f 44 00 00    	nopw   0x0\(%eax,%eax,1\)
+ 
+ Disassembly of section .text:
+ 
+-0+200 <foo>:
++0+1.0 <foo>:
+  +[a-f0-9]+:	53                   	push   %ebx
+- +[a-f0-9]+:	e8 18 00 00 00       	call   21e <__x86.get_pc_thunk.bx>
+- +[a-f0-9]+:	81 c3 36 11 00 00    	add    \$0x1136,%ebx
++ +[a-f0-9]+:	e8 18 00 00 00       	call   1.e <__x86.get_pc_thunk.bx>
++ +[a-f0-9]+:	81 c3 1a 11 00 00    	add    \$0x111a,%ebx
+  +[a-f0-9]+:	83 ec 08             	sub    \$0x8,%esp
+- +[a-f0-9]+:	e8 dc ff ff ff       	call   1f0 <bar2@plt>
+- +[a-f0-9]+:	e8 c7 ff ff ff       	call   1e0 <bar1@plt>
++ +[a-f0-9]+:	e8 dc ff ff ff       	call   1.0 <bar2@plt>
++ +[a-f0-9]+:	e8 c7 ff ff ff       	call   1.0 <bar1@plt>
+  +[a-f0-9]+:	83 c4 08             	add    \$0x8,%esp
+  +[a-f0-9]+:	5b                   	pop    %ebx
+  +[a-f0-9]+:	c3                   	ret    
+ 
+-0+21e <__x86.get_pc_thunk.bx>:
++0+1.e <__x86.get_pc_thunk.bx>:
+  +[a-f0-9]+:	8b 1c 24             	mov    \(%esp\),%ebx
+  +[a-f0-9]+:	c3                   	ret    
+ #pass
+diff -rup binutils.orig/ld/testsuite/ld-i386/ibt-plt-2b.d binutils-2.30/ld/testsuite/ld-i386/ibt-plt-2b.d
+--- binutils.orig/ld/testsuite/ld-i386/ibt-plt-2b.d	2020-04-07 11:32:17.355775832 +0100
++++ binutils-2.30/ld/testsuite/ld-i386/ibt-plt-2b.d	2020-04-07 13:34:03.907784031 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-2.s
+ #as: --32
+-#ld: -shared -m elf_i386 -z ibtplt --hash-style=sysv
++#ld: -shared -m elf_i386 -z ibtplt --hash-style=sysv -z noseparate-code
+ #readelf: -n -wf
+ 
+ Contents of the .eh_frame section:
+@@ -18,37 +18,31 @@ Contents of the .eh_frame section:
+   DW_CFA_nop
+   DW_CFA_nop
+ 
+-0+18 0000001c 0000001c FDE cie=00000000 pc=00000200..0000021e
+-  DW_CFA_advance_loc: 1 to 00000201
++0+18 0000001c 0000001c FDE cie=00000000 pc=000001.0..000001.e
++  DW_CFA_advance_loc: 1 to 000001.1
+   DW_CFA_def_cfa_offset: 8
+   DW_CFA_offset: r3 \(ebx\) at cfa-8
+-  DW_CFA_advance_loc: 14 to 0000020f
++  DW_CFA_advance_loc: 14 to 000001.f
+   DW_CFA_def_cfa_offset: 16
+-  DW_CFA_advance_loc: 13 to 0000021c
++  DW_CFA_advance_loc: 13 to 000001.c
+   DW_CFA_def_cfa_offset: 8
+-  DW_CFA_advance_loc: 1 to 0000021d
++  DW_CFA_advance_loc: 1 to 000001.d
+   DW_CFA_restore: r3 \(ebx\)
+   DW_CFA_def_cfa_offset: 4
+ 
+-0+38 00000010 0000003c FDE cie=00000000 pc=0000021e..00000222
++0+38 00000010 0000003c FDE cie=00000000 pc=000001.e..00000..2
+   DW_CFA_nop
+   DW_CFA_nop
+   DW_CFA_nop
+ 
+-0+4c 00000020 00000050 FDE cie=00000000 pc=000001b0..000001e0
++0+4c 00000020 00000050 FDE cie=00000000 pc=000001.0..000001.0
+   DW_CFA_def_cfa_offset: 8
+-  DW_CFA_advance_loc: 6 to 000001b6
++  DW_CFA_advance_loc: 6 to 000001.6
+   DW_CFA_def_cfa_offset: 12
+-  DW_CFA_advance_loc: 10 to 000001c0
++  DW_CFA_advance_loc: 10 to 000001.0
+   DW_CFA_def_cfa_expression \(DW_OP_breg4 \(esp\): 4; DW_OP_breg8 \(eip\): 0; DW_OP_lit15; DW_OP_and; DW_OP_lit9; DW_OP_ge; DW_OP_lit2; DW_OP_shl; DW_OP_plus\)
+ 
+-0+70 00000010 00000074 FDE cie=00000000 pc=000001e0..00000200
++0+70 00000010 00000074 FDE cie=00000000 pc=000001.0..000001.0
+   DW_CFA_nop
+   DW_CFA_nop
+   DW_CFA_nop
+-
+-
+-Displaying notes found in: .note.gnu.property
+-  Owner                 Data size	Description
+-  GNU                  0x0000000c	NT_GNU_PROPERTY_TYPE_0
+-      Properties: x86 feature: 
+diff -rup binutils.orig/ld/testsuite/ld-i386/ibt-plt-2c.d binutils-2.30/ld/testsuite/ld-i386/ibt-plt-2c.d
+--- binutils.orig/ld/testsuite/ld-i386/ibt-plt-2c.d	2020-04-07 11:32:17.357775817 +0100
++++ binutils-2.30/ld/testsuite/ld-i386/ibt-plt-2c.d	2020-04-07 13:34:03.907784031 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-2.s
+ #as: --32
+-#ld: -shared -m elf_i386 -z ibt --hash-style=sysv
++#ld: -shared -m elf_i386 -z ibt --hash-style=sysv -z noseparate-code
+ #objdump: -dw
+ 
+ .*: +file format .*
+@@ -8,45 +8,45 @@
+ 
+ Disassembly of section .plt:
+ 
+-0+1b0 <.plt>:
++[a-f0-9]+ <.plt>:
+  +[a-f0-9]+:	ff b3 04 00 00 00    	pushl  0x4\(%ebx\)
+  +[a-f0-9]+:	ff a3 08 00 00 00    	jmp    \*0x8\(%ebx\)
+  +[a-f0-9]+:	0f 1f 40 00          	nopl   0x0\(%eax\)
+  +[a-f0-9]+:	f3 0f 1e fb          	endbr32 
+  +[a-f0-9]+:	68 00 00 00 00       	push   \$0x0
+- +[a-f0-9]+:	e9 e2 ff ff ff       	jmp    1b0 <.plt>
++ +[a-f0-9]+:	e9 e2 ff ff ff       	jmp    [a-f0-9]+ <.plt>
+  +[a-f0-9]+:	66 90                	xchg   %ax,%ax
+  +[a-f0-9]+:	f3 0f 1e fb          	endbr32 
+  +[a-f0-9]+:	68 08 00 00 00       	push   \$0x8
+- +[a-f0-9]+:	e9 d2 ff ff ff       	jmp    1b0 <.plt>
++ +[a-f0-9]+:	e9 d2 ff ff ff       	jmp    [a-f0-9]+ <.plt>
+  +[a-f0-9]+:	66 90                	xchg   %ax,%ax
+ 
+ Disassembly of section .plt.sec:
+ 
+-0+1e0 <bar1@plt>:
++[a-f0-9]+ <bar1@plt>:
+  +[a-f0-9]+:	f3 0f 1e fb          	endbr32 
+  +[a-f0-9]+:	ff a3 0c 00 00 00    	jmp    \*0xc\(%ebx\)
+  +[a-f0-9]+:	66 0f 1f 44 00 00    	nopw   0x0\(%eax,%eax,1\)
+ 
+-0+1f0 <bar2@plt>:
++[a-f0-9]+ <bar2@plt>:
+  +[a-f0-9]+:	f3 0f 1e fb          	endbr32 
+  +[a-f0-9]+:	ff a3 10 00 00 00    	jmp    \*0x10\(%ebx\)
+  +[a-f0-9]+:	66 0f 1f 44 00 00    	nopw   0x0\(%eax,%eax,1\)
+ 
+ Disassembly of section .text:
+ 
+-0+200 <foo>:
++[a-f0-9]+ <foo>:
+  +[a-f0-9]+:	53                   	push   %ebx
+- +[a-f0-9]+:	e8 18 00 00 00       	call   21e <__x86.get_pc_thunk.bx>
+- +[a-f0-9]+:	81 c3 36 11 00 00    	add    \$0x1136,%ebx
++ +[a-f0-9]+:	e8 18 00 00 00       	call   [0-9a-f]+ <__x86.get_pc_thunk.bx>
++ +[a-f0-9]+:	81 c3 ([0-9a-f]{2} ){4}[ 	]+add    \$0x[a-f0-9]+,%ebx
+  +[a-f0-9]+:	83 ec 08             	sub    \$0x8,%esp
+- +[a-f0-9]+:	e8 dc ff ff ff       	call   1f0 <bar2@plt>
+- +[a-f0-9]+:	e8 c7 ff ff ff       	call   1e0 <bar1@plt>
++ +[a-f0-9]+:	e8 dc ff ff ff       	call   [a-f0-9]+ <bar2@plt>
++ +[a-f0-9]+:	e8 c7 ff ff ff       	call   [a-f0-9]+ <bar1@plt>
+  +[a-f0-9]+:	83 c4 08             	add    \$0x8,%esp
+  +[a-f0-9]+:	5b                   	pop    %ebx
+  +[a-f0-9]+:	c3                   	ret    
+ 
+-0+21e <__x86.get_pc_thunk.bx>:
++[a-f0-9]+ <__x86.get_pc_thunk.bx>:
+  +[a-f0-9]+:	8b 1c 24             	mov    \(%esp\),%ebx
+  +[a-f0-9]+:	c3                   	ret    
+ #pass
+diff -rup binutils.orig/ld/testsuite/ld-i386/ibt-plt-2d.d binutils-2.30/ld/testsuite/ld-i386/ibt-plt-2d.d
+--- binutils.orig/ld/testsuite/ld-i386/ibt-plt-2d.d	2020-04-07 11:32:17.354775839 +0100
++++ binutils-2.30/ld/testsuite/ld-i386/ibt-plt-2d.d	2020-04-07 13:34:03.907784031 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-2.s
+ #as: --32
+-#ld: -shared -m elf_i386 -z ibt --hash-style=sysv
++#ld: -shared -m elf_i386 -z ibt --hash-style=sysv -z noseparate-code
+ #readelf: -n -wf
+ 
+ Contents of the .eh_frame section:
+@@ -18,31 +18,31 @@ Contents of the .eh_frame section:
+   DW_CFA_nop
+   DW_CFA_nop
+ 
+-0+18 0000001c 0000001c FDE cie=00000000 pc=00000200..0000021e
+-  DW_CFA_advance_loc: 1 to 00000201
++0+18 0000001c 0000001c FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
++  DW_CFA_advance_loc: 1 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 8
+   DW_CFA_offset: r3 \(ebx\) at cfa-8
+-  DW_CFA_advance_loc: 14 to 0000020f
++  DW_CFA_advance_loc: 14 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 16
+-  DW_CFA_advance_loc: 13 to 0000021c
++  DW_CFA_advance_loc: 13 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 8
+-  DW_CFA_advance_loc: 1 to 0000021d
++  DW_CFA_advance_loc: 1 to [a-f0-9]+
+   DW_CFA_restore: r3 \(ebx\)
+   DW_CFA_def_cfa_offset: 4
+ 
+-0+38 00000010 0000003c FDE cie=00000000 pc=0000021e..00000222
++0+38 00000010 0000003c FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
+   DW_CFA_nop
+   DW_CFA_nop
+   DW_CFA_nop
+ 
+-0+4c 00000020 00000050 FDE cie=00000000 pc=000001b0..000001e0
++0+4c 00000020 00000050 FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
+   DW_CFA_def_cfa_offset: 8
+-  DW_CFA_advance_loc: 6 to 000001b6
++  DW_CFA_advance_loc: 6 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 12
+-  DW_CFA_advance_loc: 10 to 000001c0
++  DW_CFA_advance_loc: 10 to [a-f0-9]+
+   DW_CFA_def_cfa_expression \(DW_OP_breg4 \(esp\): 4; DW_OP_breg8 \(eip\): 0; DW_OP_lit15; DW_OP_and; DW_OP_lit9; DW_OP_ge; DW_OP_lit2; DW_OP_shl; DW_OP_plus\)
+ 
+-0+70 00000010 00000074 FDE cie=00000000 pc=000001e0..00000200
++0+70 00000010 00000074 FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
+   DW_CFA_nop
+   DW_CFA_nop
+   DW_CFA_nop
+diff -rup binutils.orig/ld/testsuite/ld-i386/ibt-plt-3d.d binutils-2.30/ld/testsuite/ld-i386/ibt-plt-3d.d
+--- binutils.orig/ld/testsuite/ld-i386/ibt-plt-3d.d	2020-04-07 11:32:17.364775766 +0100
++++ binutils-2.30/ld/testsuite/ld-i386/ibt-plt-3d.d	2020-04-07 13:34:03.907784031 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-3.s
+ #as: --32
+-#ld: -shared -m elf_i386 -z ibt --hash-style=sysv
++#ld: -shared -m elf_i386 -z ibt --hash-style=sysv -z noseparate-code
+ #readelf: -wf -n
+ 
+ Contents of the .eh_frame section:
+@@ -18,31 +18,31 @@ Contents of the .eh_frame section:
+   DW_CFA_nop
+   DW_CFA_nop
+ 
+-0+18 0000001c 0000001c FDE cie=00000000 pc=00000200..0000021e
+-  DW_CFA_advance_loc: 1 to 00000201
++0+18 0000001c 0000001c FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
++  DW_CFA_advance_loc: 1 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 8
+   DW_CFA_offset: r3 \(ebx\) at cfa-8
+-  DW_CFA_advance_loc: 14 to 0000020f
++  DW_CFA_advance_loc: 14 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 16
+-  DW_CFA_advance_loc: 13 to 0000021c
++  DW_CFA_advance_loc: 13 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 8
+-  DW_CFA_advance_loc: 1 to 0000021d
++  DW_CFA_advance_loc: 1 to [a-f0-9]+
+   DW_CFA_restore: r3 \(ebx\)
+   DW_CFA_def_cfa_offset: 4
+ 
+-0+38 00000010 0000003c FDE cie=00000000 pc=0000021e..00000222
++0+38 00000010 0000003c FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
+   DW_CFA_nop
+   DW_CFA_nop
+   DW_CFA_nop
+ 
+-0+4c 00000020 00000050 FDE cie=00000000 pc=000001b0..000001e0
++0+4c 00000020 00000050 FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
+   DW_CFA_def_cfa_offset: 8
+-  DW_CFA_advance_loc: 6 to 000001b6
++  DW_CFA_advance_loc: 6 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 12
+-  DW_CFA_advance_loc: 10 to 000001c0
++  DW_CFA_advance_loc: 10 to [a-f0-9]+
+   DW_CFA_def_cfa_expression \(DW_OP_breg4 \(esp\): 4; DW_OP_breg8 \(eip\): 0; DW_OP_lit15; DW_OP_and; DW_OP_lit9; DW_OP_ge; DW_OP_lit2; DW_OP_shl; DW_OP_plus\)
+ 
+-0+70 00000010 00000074 FDE cie=00000000 pc=000001e0..00000200
++0+70 00000010 00000074 FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
+   DW_CFA_nop
+   DW_CFA_nop
+   DW_CFA_nop
+diff -rup binutils.orig/ld/testsuite/ld-i386/pr23372a.d binutils-2.30/ld/testsuite/ld-i386/pr23372a.d
+--- binutils.orig/ld/testsuite/ld-i386/pr23372a.d	2020-04-07 11:32:17.357775817 +0100
++++ binutils-2.30/ld/testsuite/ld-i386/pr23372a.d	2020-04-07 13:34:03.907784031 +0100
+@@ -3,3 +3,8 @@
+ #as: --32
+ #ld: -r -m elf_i386
+ #readelf: -n
++
++Displaying notes found in: .note.gnu.property
++  Owner                 Data size	Description
++  GNU                  0x[0-9a-f]+	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA used: 
+diff -rup binutils.orig/ld/testsuite/ld-i386/property-x86-ibt3a.d binutils-2.30/ld/testsuite/ld-i386/property-x86-ibt3a.d
+--- binutils.orig/ld/testsuite/ld-i386/property-x86-ibt3a.d	2020-04-07 11:32:17.358775810 +0100
++++ binutils-2.30/ld/testsuite/ld-i386/property-x86-ibt3a.d	2020-04-07 13:34:03.907784031 +0100
+@@ -6,6 +6,5 @@
+ 
+ Displaying notes found in: .note.gnu.property
+   Owner                 Data size	Description
+-  GNU                  0x00000018	NT_GNU_PROPERTY_TYPE_0
+-      Properties: x86 ISA used: i486, 586, SSE2, SSE3
+-	x86 ISA needed: 586, SSE, SSE3, SSE4_1
++  GNU                  0x0000000c	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA needed: 586, SSE, SSE3, SSE4_1
+diff -rup binutils.orig/ld/testsuite/ld-i386/property-x86-ibt3b.d binutils-2.30/ld/testsuite/ld-i386/property-x86-ibt3b.d
+--- binutils.orig/ld/testsuite/ld-i386/property-x86-ibt3b.d	2020-04-07 11:32:17.353775846 +0100
++++ binutils-2.30/ld/testsuite/ld-i386/property-x86-ibt3b.d	2020-04-07 13:34:03.908784024 +0100
+@@ -6,6 +6,5 @@
+ 
+ Displaying notes found in: .note.gnu.property
+   Owner                 Data size	Description
+-  GNU                  0x00000018	NT_GNU_PROPERTY_TYPE_0
+-      Properties: x86 ISA used: i486, 586, SSE2, SSE3
+-	x86 ISA needed: 586, SSE, SSE3, SSE4_1
++  GNU                  0x0000000c	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA needed: 586, SSE, SSE3, SSE4_1
+diff -rup binutils.orig/ld/testsuite/ld-i386/property-x86-shstk3a.d binutils-2.30/ld/testsuite/ld-i386/property-x86-shstk3a.d
+--- binutils.orig/ld/testsuite/ld-i386/property-x86-shstk3a.d	2020-04-07 11:32:17.355775832 +0100
++++ binutils-2.30/ld/testsuite/ld-i386/property-x86-shstk3a.d	2020-04-07 13:34:03.908784024 +0100
+@@ -6,6 +6,5 @@
+ 
+ Displaying notes found in: .note.gnu.property
+   Owner                 Data size	Description
+-  GNU                  0x00000018	NT_GNU_PROPERTY_TYPE_0
+-      Properties: x86 ISA used: i486, 586, SSE2, SSE3
+-	x86 ISA needed: 586, SSE, SSE3, SSE4_1
++  GNU                  0x0000000c	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA needed: 586, SSE, SSE3, SSE4_1
+diff -rup binutils.orig/ld/testsuite/ld-i386/property-x86-shstk3b.d binutils-2.30/ld/testsuite/ld-i386/property-x86-shstk3b.d
+--- binutils.orig/ld/testsuite/ld-i386/property-x86-shstk3b.d	2020-04-07 11:32:17.362775781 +0100
++++ binutils-2.30/ld/testsuite/ld-i386/property-x86-shstk3b.d	2020-04-07 13:34:03.908784024 +0100
+@@ -6,6 +6,5 @@
+ 
+ Displaying notes found in: .note.gnu.property
+   Owner                 Data size	Description
+-  GNU                  0x00000018	NT_GNU_PROPERTY_TYPE_0
+-      Properties: x86 ISA used: i486, 586, SSE2, SSE3
+-	x86 ISA needed: 586, SSE, SSE3, SSE4_1
++  GNU                  0x0000000c	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA needed: 586, SSE, SSE3, SSE4_1
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-1-x32.d binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-1-x32.d
+--- binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-1-x32.d	2020-04-07 11:32:17.432775271 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-1-x32.d	2020-04-07 13:34:03.908784024 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-1.s
+ #as: --x32
+-#ld: -shared -m elf32_x86_64 --hash-style=sysv
++#ld: -shared -m elf32_x86_64 --hash-style=sysv -z max-page-size=0x200000 -z noseparate-code
+ #objdump: -dw
+ 
+ .*: +file format .*
+@@ -8,36 +8,36 @@
+ 
+ Disassembly of section .plt:
+ 
+-0+1c0 <.plt>:
+- +[a-f0-9]+:	ff 35 62 01 20 00    	pushq  0x200162\(%rip\)        # 200328 <_GLOBAL_OFFSET_TABLE_\+0x8>
+- +[a-f0-9]+:	ff 25 64 01 20 00    	jmpq   \*0x200164\(%rip\)        # 200330 <_GLOBAL_OFFSET_TABLE_\+0x10>
++[a-f0-9]+ <.plt>:
++ +[a-f0-9]+:	ff 35 ([0-9a-f]{2} ){4}[ 	]+pushq  0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <_GLOBAL_OFFSET_TABLE_\+0x8>
++ +[a-f0-9]+:	ff 25 ([0-9a-f]{2} ){4}[ 	]+jmpq   \*0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <_GLOBAL_OFFSET_TABLE_\+0x10>
+  +[a-f0-9]+:	0f 1f 40 00          	nopl   0x0\(%rax\)
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+  +[a-f0-9]+:	68 00 00 00 00       	pushq  \$0x0
+- +[a-f0-9]+:	e9 e2 ff ff ff       	jmpq   1c0 <.plt>
++ +[a-f0-9]+:	e9 e2 ff ff ff       	jmpq   [a-f0-9]+ <.plt>
+  +[a-f0-9]+:	66 90                	xchg   %ax,%ax
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+  +[a-f0-9]+:	68 01 00 00 00       	pushq  \$0x1
+- +[a-f0-9]+:	e9 d2 ff ff ff       	jmpq   1c0 <.plt>
++ +[a-f0-9]+:	e9 d2 ff ff ff       	jmpq   [a-f0-9]+ <.plt>
+  +[a-f0-9]+:	66 90                	xchg   %ax,%ax
+ 
+ Disassembly of section .plt.sec:
+ 
+-0+1f0 <bar1@plt>:
++[a-f0-9]+ <bar1@plt>:
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+- +[a-f0-9]+:	ff 25 3e 01 20 00    	jmpq   \*0x20013e\(%rip\)        # 200338 <bar1>
++ +[a-f0-9]+:	ff 25 ([0-9a-f]{2} ){4}[ 	]+jmpq   \*0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <bar1>
+  +[a-f0-9]+:	66 0f 1f 44 00 00    	nopw   0x0\(%rax,%rax,1\)
+ 
+-0+200 <bar2@plt>:
++[a-f0-9]+ <bar2@plt>:
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+- +[a-f0-9]+:	ff 25 36 01 20 00    	jmpq   \*0x200136\(%rip\)        # 200340 <bar2>
++ +[a-f0-9]+:	ff 25 ([0-9a-f]{2} ){4}[ 	]+jmpq   \*0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <bar2>
+  +[a-f0-9]+:	66 0f 1f 44 00 00    	nopw   0x0\(%rax,%rax,1\)
+ 
+ Disassembly of section .text:
+ 
+-0+210 <foo>:
++[a-f0-9]+ <foo>:
+  +[a-f0-9]+:	48 83 ec 08          	sub    \$0x8,%rsp
+- +[a-f0-9]+:	e8 e7 ff ff ff       	callq  200 <bar2@plt>
++ +[a-f0-9]+:	e8 e7 ff ff ff       	callq  [a-f0-9]+ <bar2@plt>
+  +[a-f0-9]+:	48 83 c4 08          	add    \$0x8,%rsp
+- +[a-f0-9]+:	e9 ce ff ff ff       	jmpq   1f0 <bar1@plt>
++ +[a-f0-9]+:	e9 ce ff ff ff       	jmpq   [a-f0-9]+ <bar1@plt>
+ #pass
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-1.d binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-1.d
+--- binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-1.d	2020-04-07 11:32:17.431775279 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-1.d	2020-04-07 13:34:03.908784024 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-1.s
+ #as: --64 -defsym __64_bit__=1
+-#ld: -shared -m elf_x86_64 --hash-style=sysv
++#ld: -shared -m elf_x86_64 --hash-style=sysv -z max-page-size=0x200000 -z noseparate-code
+ #objdump: -dw
+ 
+ .*: +file format .*
+@@ -8,36 +8,36 @@
+ 
+ Disassembly of section .plt:
+ 
+-0+290 <.plt>:
+- +[a-f0-9]+:	ff 35 ea 01 20 00    	pushq  0x2001ea\(%rip\)        # 200480 <_GLOBAL_OFFSET_TABLE_\+0x8>
+- +[a-f0-9]+:	f2 ff 25 eb 01 20 00 	bnd jmpq \*0x2001eb\(%rip\)        # 200488 <_GLOBAL_OFFSET_TABLE_\+0x10>
++[a-f0-9]+ <.plt>:
++ +[a-f0-9]+:	ff 35 ([0-9a-f]{2} ){4}[ 	]+pushq  0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <_GLOBAL_OFFSET_TABLE_\+0x8>
++ +[a-f0-9]+:	f2 ff 25 ([0-9a-f]{2} ){4}[ 	]+bnd jmpq \*0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <_GLOBAL_OFFSET_TABLE_\+0x10>
+  +[a-f0-9]+:	0f 1f 00             	nopl   \(%rax\)
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+  +[a-f0-9]+:	68 00 00 00 00       	pushq  \$0x0
+- +[a-f0-9]+:	f2 e9 e1 ff ff ff    	bnd jmpq 290 <.plt>
++ +[a-f0-9]+:	f2 e9 e1 ff ff ff    	bnd jmpq [a-f0-9]+ <.plt>
+  +[a-f0-9]+:	90                   	nop
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+  +[a-f0-9]+:	68 01 00 00 00       	pushq  \$0x1
+- +[a-f0-9]+:	f2 e9 d1 ff ff ff    	bnd jmpq 290 <.plt>
++ +[a-f0-9]+:	f2 e9 d1 ff ff ff    	bnd jmpq [a-f0-9]+ <.plt>
+  +[a-f0-9]+:	90                   	nop
+ 
+ Disassembly of section .plt.sec:
+ 
+-0+2c0 <bar1@plt>:
++[a-f0-9]+ <bar1@plt>:
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+- +[a-f0-9]+:	f2 ff 25 c5 01 20 00 	bnd jmpq \*0x2001c5\(%rip\)        # 200490 <bar1>
++ +[a-f0-9]+:	f2 ff 25 ([0-9a-f]{2} ){4}[ 	]+bnd jmpq \*0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <bar1>
+  +[a-f0-9]+:	0f 1f 44 00 00       	nopl   0x0\(%rax,%rax,1\)
+ 
+-0+2d0 <bar2@plt>:
++[a-f0-9]+ <bar2@plt>:
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+- +[a-f0-9]+:	f2 ff 25 bd 01 20 00 	bnd jmpq \*0x2001bd\(%rip\)        # 200498 <bar2>
++ +[a-f0-9]+:	f2 ff 25 ([0-9a-f]{2} ){4}[ 	]+bnd jmpq \*0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <bar2>
+  +[a-f0-9]+:	0f 1f 44 00 00       	nopl   0x0\(%rax,%rax,1\)
+ 
+ Disassembly of section .text:
+ 
+-0+2e0 <foo>:
++[a-f0-9]+ <foo>:
+  +[a-f0-9]+:	48 83 ec 08          	sub    \$0x8,%rsp
+- +[a-f0-9]+:	e8 e7 ff ff ff       	callq  2d0 <bar2@plt>
++ +[a-f0-9]+:	e8 e7 ff ff ff       	callq  [a-f0-9]+ <bar2@plt>
+  +[a-f0-9]+:	48 83 c4 08          	add    \$0x8,%rsp
+- +[a-f0-9]+:	e9 ce ff ff ff       	jmpq   2c0 <bar1@plt>
++ +[a-f0-9]+:	e9 ce ff ff ff       	jmpq   [a-f0-9]+ <bar1@plt>
+ #pass
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-2a-x32.d binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-2a-x32.d
+--- binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-2a-x32.d	2020-04-07 11:32:17.427775308 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-2a-x32.d	2020-04-07 13:34:03.908784024 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-2.s
+ #as: --x32
+-#ld: -shared -m elf32_x86_64 -z ibtplt --hash-style=sysv
++#ld: -shared -m elf32_x86_64 -z ibtplt --hash-style=sysv -z max-page-size=0x200000 -z noseparate-code
+ #objdump: -dw
+ 
+ .*: +file format .*
+@@ -8,36 +8,36 @@
+ 
+ Disassembly of section .plt:
+ 
+-0+1c0 <.plt>:
+- +[a-f0-9]+:	ff 35 62 01 20 00    	pushq  0x200162\(%rip\)        # 200328 <_GLOBAL_OFFSET_TABLE_\+0x8>
+- +[a-f0-9]+:	ff 25 64 01 20 00    	jmpq   \*0x200164\(%rip\)        # 200330 <_GLOBAL_OFFSET_TABLE_\+0x10>
++0+1.0 <.plt>:
++ +[a-f0-9]+:	ff 35 4a 01 20 00    	pushq  0x20014a\(%rip\)        # 200... <_GLOBAL_OFFSET_TABLE_\+0x8>
++ +[a-f0-9]+:	ff 25 4c 01 20 00    	jmpq   \*0x20014c\(%rip\)        # 200... <_GLOBAL_OFFSET_TABLE_\+0x10>
+  +[a-f0-9]+:	0f 1f 40 00          	nopl   0x0\(%rax\)
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+  +[a-f0-9]+:	68 00 00 00 00       	pushq  \$0x0
+- +[a-f0-9]+:	e9 e2 ff ff ff       	jmpq   1c0 <.plt>
++ +[a-f0-9]+:	e9 e2 ff ff ff       	jmpq   1.0 <.plt>
+  +[a-f0-9]+:	66 90                	xchg   %ax,%ax
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+  +[a-f0-9]+:	68 01 00 00 00       	pushq  \$0x1
+- +[a-f0-9]+:	e9 d2 ff ff ff       	jmpq   1c0 <.plt>
++ +[a-f0-9]+:	e9 d2 ff ff ff       	jmpq   1.0 <.plt>
+  +[a-f0-9]+:	66 90                	xchg   %ax,%ax
+ 
+ Disassembly of section .plt.sec:
+ 
+-0+1f0 <bar1@plt>:
++0+1.0 <bar1@plt>:
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+- +[a-f0-9]+:	ff 25 3e 01 20 00    	jmpq   \*0x20013e\(%rip\)        # 200338 <bar1>
++ +[a-f0-9]+:	ff 25 26 01 20 00    	jmpq   \*0x200126\(%rip\)        # 200... <bar1>
+  +[a-f0-9]+:	66 0f 1f 44 00 00    	nopw   0x0\(%rax,%rax,1\)
+ 
+-0+200 <bar2@plt>:
++0+1.0 <bar2@plt>:
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+- +[a-f0-9]+:	ff 25 36 01 20 00    	jmpq   \*0x200136\(%rip\)        # 200340 <bar2>
++ +[a-f0-9]+:	ff 25 1e 01 20 00    	jmpq   \*0x20011e\(%rip\)        # 200... <bar2>
+  +[a-f0-9]+:	66 0f 1f 44 00 00    	nopw   0x0\(%rax,%rax,1\)
+ 
+ Disassembly of section .text:
+ 
+-0+210 <foo>:
++0+1.0 <foo>:
+  +[a-f0-9]+:	48 83 ec 08          	sub    \$0x8,%rsp
+- +[a-f0-9]+:	e8 e7 ff ff ff       	callq  200 <bar2@plt>
++ +[a-f0-9]+:	e8 e7 ff ff ff       	callq  1.0 <bar2@plt>
+  +[a-f0-9]+:	48 83 c4 08          	add    \$0x8,%rsp
+- +[a-f0-9]+:	e9 ce ff ff ff       	jmpq   1f0 <bar1@plt>
++ +[a-f0-9]+:	e9 ce ff ff ff       	jmpq   1.0 <bar1@plt>
+ #pass
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-2a.d binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-2a.d
+--- binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-2a.d	2020-04-07 11:32:17.434775257 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-2a.d	2020-04-07 13:34:03.908784024 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-2.s
+ #as: --64 -defsym __64_bit__=1
+-#ld: -shared -m elf_x86_64 -z ibtplt --hash-style=sysv
++#ld: -shared -m elf_x86_64 -z ibtplt --hash-style=sysv -z max-page-size=0x200000 -z noseparate-code
+ #objdump: -dw
+ 
+ .*: +file format .*
+@@ -8,36 +8,36 @@
+ 
+ Disassembly of section .plt:
+ 
+-0+290 <.plt>:
+- +[a-f0-9]+:	ff 35 ea 01 20 00    	pushq  0x2001ea\(%rip\)        # 200480 <_GLOBAL_OFFSET_TABLE_\+0x8>
+- +[a-f0-9]+:	f2 ff 25 eb 01 20 00 	bnd jmpq \*0x2001eb\(%rip\)        # 200488 <_GLOBAL_OFFSET_TABLE_\+0x10>
++0+..0 <.plt>:
++ +[a-f0-9]+:	ff 35 ca 01 20 00    	pushq  0x2001ca\(%rip\)        # 200... <_GLOBAL_OFFSET_TABLE_\+0x8>
++ +[a-f0-9]+:	f2 ff 25 cb 01 20 00 	bnd jmpq \*0x2001cb\(%rip\)        # 200... <_GLOBAL_OFFSET_TABLE_\+0x10>
+  +[a-f0-9]+:	0f 1f 00             	nopl   \(%rax\)
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+  +[a-f0-9]+:	68 00 00 00 00       	pushq  \$0x0
+- +[a-f0-9]+:	f2 e9 e1 ff ff ff    	bnd jmpq 290 <.plt>
++ +[a-f0-9]+:	f2 e9 e1 ff ff ff    	bnd jmpq ..0 <.plt>
+  +[a-f0-9]+:	90                   	nop
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+  +[a-f0-9]+:	68 01 00 00 00       	pushq  \$0x1
+- +[a-f0-9]+:	f2 e9 d1 ff ff ff    	bnd jmpq 290 <.plt>
++ +[a-f0-9]+:	f2 e9 d1 ff ff ff    	bnd jmpq ..0 <.plt>
+  +[a-f0-9]+:	90                   	nop
+ 
+ Disassembly of section .plt.sec:
+ 
+-0+2c0 <bar1@plt>:
++0+..0 <bar1@plt>:
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+- +[a-f0-9]+:	f2 ff 25 c5 01 20 00 	bnd jmpq \*0x2001c5\(%rip\)        # 200490 <bar1>
++ +[a-f0-9]+:	f2 ff 25 a5 01 20 00 	bnd jmpq \*0x2001a5\(%rip\)        # 200... <bar1>
+  +[a-f0-9]+:	0f 1f 44 00 00       	nopl   0x0\(%rax,%rax,1\)
+ 
+-0+2d0 <bar2@plt>:
++0+..0 <bar2@plt>:
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+- +[a-f0-9]+:	f2 ff 25 bd 01 20 00 	bnd jmpq \*0x2001bd\(%rip\)        # 200498 <bar2>
++ +[a-f0-9]+:	f2 ff 25 9d 01 20 00 	bnd jmpq \*0x20019d\(%rip\)        # 200... <bar2>
+  +[a-f0-9]+:	0f 1f 44 00 00       	nopl   0x0\(%rax,%rax,1\)
+ 
+ Disassembly of section .text:
+ 
+-0+2e0 <foo>:
++0+..0 <foo>:
+  +[a-f0-9]+:	48 83 ec 08          	sub    \$0x8,%rsp
+- +[a-f0-9]+:	e8 e7 ff ff ff       	callq  2d0 <bar2@plt>
++ +[a-f0-9]+:	e8 e7 ff ff ff       	callq  ..0 <bar2@plt>
+  +[a-f0-9]+:	48 83 c4 08          	add    \$0x8,%rsp
+- +[a-f0-9]+:	e9 ce ff ff ff       	jmpq   2c0 <bar1@plt>
++ +[a-f0-9]+:	e9 ce ff ff ff       	jmpq   ..0 <bar1@plt>
+ #pass
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-2b-x32.d binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-2b-x32.d
+--- binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-2b-x32.d	2020-04-07 11:32:17.432775271 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-2b-x32.d	2020-04-07 13:34:03.908784024 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-2.s
+ #as: --x32
+-#ld: -shared -m elf32_x86_64 -z ibtplt --hash-style=sysv
++#ld: -shared -m elf32_x86_64 -z ibtplt --hash-style=sysv -z max-page-size=0x200000 -z noseparate-code
+ #readelf: -n -wf
+ 
+ Contents of the .eh_frame section:
+@@ -18,27 +18,21 @@ Contents of the .eh_frame section:
+   DW_CFA_nop
+   DW_CFA_nop
+ 
+-0+18 00000014 0000001c FDE cie=00000000 pc=00000210..00000222
+-  DW_CFA_advance_loc: 4 to 00000214
++0+18 00000014 0000001c FDE cie=00000000 pc=00000..0..00000..2
++  DW_CFA_advance_loc: 4 to 00000..4
+   DW_CFA_def_cfa_offset: 16
+-  DW_CFA_advance_loc: 9 to 0000021d
++  DW_CFA_advance_loc: 9 to 00000..d
+   DW_CFA_def_cfa_offset: 8
+   DW_CFA_nop
+ 
+-0+30 00000020 00000034 FDE cie=00000000 pc=000001c0..000001f0
++0+30 00000020 00000034 FDE cie=00000000 pc=00000..0..00000..0
+   DW_CFA_def_cfa_offset: 16
+-  DW_CFA_advance_loc: 6 to 000001c6
++  DW_CFA_advance_loc: 6 to 00000..6
+   DW_CFA_def_cfa_offset: 24
+-  DW_CFA_advance_loc: 10 to 000001d0
++  DW_CFA_advance_loc: 10 to 00000..0
+   DW_CFA_def_cfa_expression \(DW_OP_breg7 \(rsp\): 8; DW_OP_breg16 \(rip\): 0; DW_OP_lit15; DW_OP_and; DW_OP_lit9; DW_OP_ge; DW_OP_lit3; DW_OP_shl; DW_OP_plus\)
+ 
+-0+54 00000010 00000058 FDE cie=00000000 pc=000001f0..00000210
++0+54 00000010 00000058 FDE cie=00000000 pc=00000..0..00000..0
+   DW_CFA_nop
+   DW_CFA_nop
+   DW_CFA_nop
+-
+-
+-Displaying notes found in: .note.gnu.property
+-  Owner                 Data size	Description
+-  GNU                  0x0000000c	NT_GNU_PROPERTY_TYPE_0
+-      Properties: x86 feature: 
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-2b.d binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-2b.d
+--- binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-2b.d	2020-04-07 11:32:17.427775308 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-2b.d	2020-04-07 13:34:03.908784024 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-2.s
+ #as: --64 -defsym __64_bit__=1
+-#ld: -shared -m elf_x86_64 -z ibtplt --hash-style=sysv
++#ld: -shared -m elf_x86_64 -z ibtplt --hash-style=sysv -z max-page-size=0x200000 -z noseparate-code
+ #readelf: -wf -n
+ 
+ Contents of the .eh_frame section:
+@@ -18,31 +18,25 @@ Contents of the .eh_frame section:
+   DW_CFA_nop
+   DW_CFA_nop
+ 
+-0+18 0000000000000014 0000001c FDE cie=00000000 pc=00000000000002e0..00000000000002f2
+-  DW_CFA_advance_loc: 4 to 00000000000002e4
++0+18 0000000000000014 0000001c FDE cie=00000000 pc=0000000000000..0..0000000000000..2
++  DW_CFA_advance_loc: 4 to 0000000000000..4
+   DW_CFA_def_cfa_offset: 16
+-  DW_CFA_advance_loc: 9 to 00000000000002ed
++  DW_CFA_advance_loc: 9 to 0000000000000..d
+   DW_CFA_def_cfa_offset: 8
+   DW_CFA_nop
+ 
+-0+30 0000000000000024 00000034 FDE cie=00000000 pc=0000000000000290..00000000000002c0
++0+30 0000000000000024 00000034 FDE cie=00000000 pc=0000000000000..0..0000000000000..0
+   DW_CFA_def_cfa_offset: 16
+-  DW_CFA_advance_loc: 6 to 0000000000000296
++  DW_CFA_advance_loc: 6 to 0000000000000..6
+   DW_CFA_def_cfa_offset: 24
+-  DW_CFA_advance_loc: 10 to 00000000000002a0
++  DW_CFA_advance_loc: 10 to 0000000000000..0
+   DW_CFA_def_cfa_expression \(DW_OP_breg7 \(rsp\): 8; DW_OP_breg16 \(rip\): 0; DW_OP_lit15; DW_OP_and; DW_OP_lit10; DW_OP_ge; DW_OP_lit3; DW_OP_shl; DW_OP_plus\)
+   DW_CFA_nop
+   DW_CFA_nop
+   DW_CFA_nop
+   DW_CFA_nop
+ 
+-0+58 0000000000000010 0000005c FDE cie=00000000 pc=00000000000002c0..00000000000002e0
++0+58 0000000000000010 0000005c FDE cie=00000000 pc=0000000000000..0..0000000000000..0
+   DW_CFA_nop
+   DW_CFA_nop
+   DW_CFA_nop
+-
+-
+-Displaying notes found in: .note.gnu.property
+-  Owner                 Data size	Description
+-  GNU                  0x00000010	NT_GNU_PROPERTY_TYPE_0
+-      Properties: x86 feature: 
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-2c-x32.d binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-2c-x32.d
+--- binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-2c-x32.d	2020-04-07 11:32:17.429775293 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-2c-x32.d	2020-04-07 13:34:03.908784024 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-2.s
+ #as: --x32
+-#ld: -shared -m elf32_x86_64 -z ibt --hash-style=sysv
++#ld: -shared -m elf32_x86_64 -z ibt --hash-style=sysv -z max-page-size=0x200000 -z noseparate-code
+ #objdump: -dw
+ 
+ .*: +file format .*
+@@ -8,36 +8,36 @@
+ 
+ Disassembly of section .plt:
+ 
+-0+1c0 <.plt>:
+- +[a-f0-9]+:	ff 35 62 01 20 00    	pushq  0x200162\(%rip\)        # 200328 <_GLOBAL_OFFSET_TABLE_\+0x8>
+- +[a-f0-9]+:	ff 25 64 01 20 00    	jmpq   \*0x200164\(%rip\)        # 200330 <_GLOBAL_OFFSET_TABLE_\+0x10>
++[a-f0-9]+ <.plt>:
++ +[a-f0-9]+:	ff 35 ([0-9a-f]{2} ){4}[ 	]+pushq  0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <_GLOBAL_OFFSET_TABLE_\+0x8>
++ +[a-f0-9]+:	ff 25 ([0-9a-f]{2} ){4}[ 	]+jmpq   \*0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <_GLOBAL_OFFSET_TABLE_\+0x10>
+  +[a-f0-9]+:	0f 1f 40 00          	nopl   0x0\(%rax\)
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+  +[a-f0-9]+:	68 00 00 00 00       	pushq  \$0x0
+- +[a-f0-9]+:	e9 e2 ff ff ff       	jmpq   1c0 <.plt>
++ +[a-f0-9]+:	e9 e2 ff ff ff       	jmpq   [a-f0-9]+ <.plt>
+  +[a-f0-9]+:	66 90                	xchg   %ax,%ax
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+  +[a-f0-9]+:	68 01 00 00 00       	pushq  \$0x1
+- +[a-f0-9]+:	e9 d2 ff ff ff       	jmpq   1c0 <.plt>
++ +[a-f0-9]+:	e9 d2 ff ff ff       	jmpq   [a-f0-9]+ <.plt>
+  +[a-f0-9]+:	66 90                	xchg   %ax,%ax
+ 
+ Disassembly of section .plt.sec:
+ 
+-0+1f0 <bar1@plt>:
++[a-f0-9]+ <bar1@plt>:
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+- +[a-f0-9]+:	ff 25 3e 01 20 00    	jmpq   \*0x20013e\(%rip\)        # 200338 <bar1>
++ +[a-f0-9]+:	ff 25 ([0-9a-f]{2} ){4}[ 	]+jmpq   \*0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <bar1>
+  +[a-f0-9]+:	66 0f 1f 44 00 00    	nopw   0x0\(%rax,%rax,1\)
+ 
+-0+200 <bar2@plt>:
++[a-f0-9]+ <bar2@plt>:
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+- +[a-f0-9]+:	ff 25 36 01 20 00    	jmpq   \*0x200136\(%rip\)        # 200340 <bar2>
++ +[a-f0-9]+:	ff 25 ([0-9a-f]{2} ){4}[ 	]+jmpq   \*0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <bar2>
+  +[a-f0-9]+:	66 0f 1f 44 00 00    	nopw   0x0\(%rax,%rax,1\)
+ 
+ Disassembly of section .text:
+ 
+-0+210 <foo>:
++[a-f0-9]+ <foo>:
+  +[a-f0-9]+:	48 83 ec 08          	sub    \$0x8,%rsp
+- +[a-f0-9]+:	e8 e7 ff ff ff       	callq  200 <bar2@plt>
++ +[a-f0-9]+:	e8 e7 ff ff ff       	callq  [a-f0-9]+ <bar2@plt>
+  +[a-f0-9]+:	48 83 c4 08          	add    \$0x8,%rsp
+- +[a-f0-9]+:	e9 ce ff ff ff       	jmpq   1f0 <bar1@plt>
++ +[a-f0-9]+:	e9 ce ff ff ff       	jmpq   [a-f0-9]+ <bar1@plt>
+ #pass
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-2c.d binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-2c.d
+--- binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-2c.d	2020-04-07 11:32:17.429775293 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-2c.d	2020-04-07 13:34:03.908784024 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-2.s
+ #as: --64 -defsym __64_bit__=1
+-#ld: -shared -m elf_x86_64 -z ibt --hash-style=sysv
++#ld: -shared -m elf_x86_64 -z ibt --hash-style=sysv -z max-page-size=0x200000 -z noseparate-code
+ #objdump: -dw
+ 
+ .*: +file format .*
+@@ -8,36 +8,36 @@
+ 
+ Disassembly of section .plt:
+ 
+-0+290 <.plt>:
+- +[a-f0-9]+:	ff 35 ea 01 20 00    	pushq  0x2001ea\(%rip\)        # 200480 <_GLOBAL_OFFSET_TABLE_\+0x8>
+- +[a-f0-9]+:	f2 ff 25 eb 01 20 00 	bnd jmpq \*0x2001eb\(%rip\)        # 200488 <_GLOBAL_OFFSET_TABLE_\+0x10>
++[a-f0-9]+ <.plt>:
++ +[a-f0-9]+:	ff 35 ([0-9a-f]{2} ){4}[ 	]+pushq  0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <_GLOBAL_OFFSET_TABLE_\+0x8>
++ +[a-f0-9]+:	f2 ff 25 ([0-9a-f]{2} ){4}[ 	]+bnd jmpq \*0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <_GLOBAL_OFFSET_TABLE_\+0x10>
+  +[a-f0-9]+:	0f 1f 00             	nopl   \(%rax\)
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+  +[a-f0-9]+:	68 00 00 00 00       	pushq  \$0x0
+- +[a-f0-9]+:	f2 e9 e1 ff ff ff    	bnd jmpq 290 <.plt>
++ +[a-f0-9]+:	f2 e9 e1 ff ff ff    	bnd jmpq [a-f0-9]+ <.plt>
+  +[a-f0-9]+:	90                   	nop
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+  +[a-f0-9]+:	68 01 00 00 00       	pushq  \$0x1
+- +[a-f0-9]+:	f2 e9 d1 ff ff ff    	bnd jmpq 290 <.plt>
++ +[a-f0-9]+:	f2 e9 d1 ff ff ff    	bnd jmpq [a-f0-9]+ <.plt>
+  +[a-f0-9]+:	90                   	nop
+ 
+ Disassembly of section .plt.sec:
+ 
+-0+2c0 <bar1@plt>:
++[a-f0-9]+ <bar1@plt>:
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+- +[a-f0-9]+:	f2 ff 25 c5 01 20 00 	bnd jmpq \*0x2001c5\(%rip\)        # 200490 <bar1>
++ +[a-f0-9]+:	f2 ff 25 ([0-9a-f]{2} ){4}[ 	]+bnd jmpq \*0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <bar1>
+  +[a-f0-9]+:	0f 1f 44 00 00       	nopl   0x0\(%rax,%rax,1\)
+ 
+-0+2d0 <bar2@plt>:
++[a-f0-9]+ <bar2@plt>:
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+- +[a-f0-9]+:	f2 ff 25 bd 01 20 00 	bnd jmpq \*0x2001bd\(%rip\)        # 200498 <bar2>
++ +[a-f0-9]+:	f2 ff 25 ([0-9a-f]{2} ){4}[ 	]+bnd jmpq \*0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <bar2>
+  +[a-f0-9]+:	0f 1f 44 00 00       	nopl   0x0\(%rax,%rax,1\)
+ 
+ Disassembly of section .text:
+ 
+-0+2e0 <foo>:
++[a-f0-9]+ <foo>:
+  +[a-f0-9]+:	48 83 ec 08          	sub    \$0x8,%rsp
+- +[a-f0-9]+:	e8 e7 ff ff ff       	callq  2d0 <bar2@plt>
++ +[a-f0-9]+:	e8 e7 ff ff ff       	callq  [a-f0-9]+ <bar2@plt>
+  +[a-f0-9]+:	48 83 c4 08          	add    \$0x8,%rsp
+- +[a-f0-9]+:	e9 ce ff ff ff       	jmpq   2c0 <bar1@plt>
++ +[a-f0-9]+:	e9 ce ff ff ff       	jmpq   [a-f0-9]+ <bar1@plt>
+ #pass
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-2d-x32.d binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-2d-x32.d
+--- binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-2d-x32.d	2020-04-07 11:32:17.423775337 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-2d-x32.d	2020-04-07 13:34:03.909784017 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-2.s
+ #as: --x32
+-#ld: -shared -m elf32_x86_64 -z ibt --hash-style=sysv
++#ld: -shared -m elf32_x86_64 -z ibt --hash-style=sysv -z max-page-size=0x200000 -z noseparate-code
+ #readelf: -n -wf
+ 
+ Contents of the .eh_frame section:
+@@ -18,21 +18,21 @@ Contents of the .eh_frame section:
+   DW_CFA_nop
+   DW_CFA_nop
+ 
+-0+18 00000014 0000001c FDE cie=00000000 pc=00000210..00000222
+-  DW_CFA_advance_loc: 4 to 00000214
++0+18 00000014 0000001c FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
++  DW_CFA_advance_loc: 4 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 16
+-  DW_CFA_advance_loc: 9 to 0000021d
++  DW_CFA_advance_loc: 9 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 8
+   DW_CFA_nop
+ 
+-0+30 00000020 00000034 FDE cie=00000000 pc=000001c0..000001f0
++0+30 00000020 00000034 FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
+   DW_CFA_def_cfa_offset: 16
+-  DW_CFA_advance_loc: 6 to 000001c6
++  DW_CFA_advance_loc: 6 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 24
+-  DW_CFA_advance_loc: 10 to 000001d0
++  DW_CFA_advance_loc: 10 to [a-f0-9]+
+   DW_CFA_def_cfa_expression \(DW_OP_breg7 \(rsp\): 8; DW_OP_breg16 \(rip\): 0; DW_OP_lit15; DW_OP_and; DW_OP_lit9; DW_OP_ge; DW_OP_lit3; DW_OP_shl; DW_OP_plus\)
+ 
+-0+54 00000010 00000058 FDE cie=00000000 pc=000001f0..00000210
++0+54 00000010 00000058 FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
+   DW_CFA_nop
+   DW_CFA_nop
+   DW_CFA_nop
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-2d.d binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-2d.d
+--- binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-2d.d	2020-04-07 11:32:17.425775323 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-2d.d	2020-04-07 13:34:03.909784017 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-2.s
+ #as: --64 -defsym __64_bit__=1
+-#ld: -shared -m elf_x86_64 -z ibt --hash-style=sysv
++#ld: -shared -m elf_x86_64 -z ibt --hash-style=sysv -z max-page-size=0x200000 -z noseparate-code
+ #readelf: -wf -n
+ 
+ Contents of the .eh_frame section:
+@@ -18,25 +18,25 @@ Contents of the .eh_frame section:
+   DW_CFA_nop
+   DW_CFA_nop
+ 
+-0+18 0000000000000014 0000001c FDE cie=00000000 pc=00000000000002e0..00000000000002f2
+-  DW_CFA_advance_loc: 4 to 00000000000002e4
++0+18 0000000000000014 0000001c FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
++  DW_CFA_advance_loc: 4 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 16
+-  DW_CFA_advance_loc: 9 to 00000000000002ed
++  DW_CFA_advance_loc: 9 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 8
+   DW_CFA_nop
+ 
+-0+30 0000000000000024 00000034 FDE cie=00000000 pc=0000000000000290..00000000000002c0
++0+30 0000000000000024 00000034 FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
+   DW_CFA_def_cfa_offset: 16
+-  DW_CFA_advance_loc: 6 to 0000000000000296
++  DW_CFA_advance_loc: 6 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 24
+-  DW_CFA_advance_loc: 10 to 00000000000002a0
++  DW_CFA_advance_loc: 10 to [a-f0-9]+
+   DW_CFA_def_cfa_expression \(DW_OP_breg7 \(rsp\): 8; DW_OP_breg16 \(rip\): 0; DW_OP_lit15; DW_OP_and; DW_OP_lit10; DW_OP_ge; DW_OP_lit3; DW_OP_shl; DW_OP_plus\)
+   DW_CFA_nop
+   DW_CFA_nop
+   DW_CFA_nop
+   DW_CFA_nop
+ 
+-0+58 0000000000000010 0000005c FDE cie=00000000 pc=00000000000002c0..00000000000002e0
++0+58 0000000000000010 0000005c FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
+   DW_CFA_nop
+   DW_CFA_nop
+   DW_CFA_nop
+@@ -46,3 +46,4 @@ Displaying notes found in: .note.gnu.pro
+   Owner                 Data size	Description
+   GNU                  0x00000010	NT_GNU_PROPERTY_TYPE_0
+       Properties: x86 feature: IBT
++#pass
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-3c-x32.d binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-3c-x32.d
+--- binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-3c-x32.d	2020-04-07 11:32:17.428775301 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-3c-x32.d	2020-04-07 13:34:03.909784017 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-3.s
+ #as: --x32
+-#ld: -shared -m elf32_x86_64 -z ibt --hash-style=sysv
++#ld: -shared -m elf32_x86_64 -z ibt --hash-style=sysv -z max-page-size=0x200000 -z noseparate-code
+ #objdump: -dw
+ 
+ .*: +file format .*
+@@ -8,36 +8,36 @@
+ 
+ Disassembly of section .plt:
+ 
+-0+1c0 <.plt>:
+- +[a-f0-9]+:	ff 35 62 01 20 00    	pushq  0x200162\(%rip\)        # 200328 <_GLOBAL_OFFSET_TABLE_\+0x8>
+- +[a-f0-9]+:	ff 25 64 01 20 00    	jmpq   \*0x200164\(%rip\)        # 200330 <_GLOBAL_OFFSET_TABLE_\+0x10>
++[a-f0-9]+ <.plt>:
++ +[a-f0-9]+:	ff 35 ([0-9a-f]{2} ){4}[ 	]+pushq  0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <_GLOBAL_OFFSET_TABLE_\+0x8>
++ +[a-f0-9]+:	ff 25 ([0-9a-f]{2} ){4}[ 	]+jmpq   \*0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <_GLOBAL_OFFSET_TABLE_\+0x10>
+  +[a-f0-9]+:	0f 1f 40 00          	nopl   0x0\(%rax\)
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+  +[a-f0-9]+:	68 00 00 00 00       	pushq  \$0x0
+- +[a-f0-9]+:	e9 e2 ff ff ff       	jmpq   1c0 <.plt>
++ +[a-f0-9]+:	e9 e2 ff ff ff       	jmpq   [a-f0-9]+ <.plt>
+  +[a-f0-9]+:	66 90                	xchg   %ax,%ax
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+  +[a-f0-9]+:	68 01 00 00 00       	pushq  \$0x1
+- +[a-f0-9]+:	e9 d2 ff ff ff       	jmpq   1c0 <.plt>
++ +[a-f0-9]+:	e9 d2 ff ff ff       	jmpq   [a-f0-9]+ <.plt>
+  +[a-f0-9]+:	66 90                	xchg   %ax,%ax
+ 
+ Disassembly of section .plt.sec:
+ 
+-0+1f0 <bar1@plt>:
++[a-f0-9]+ <bar1@plt>:
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+- +[a-f0-9]+:	ff 25 3e 01 20 00    	jmpq   \*0x20013e\(%rip\)        # 200338 <bar1>
++ +[a-f0-9]+:	ff 25 ([0-9a-f]{2} ){4}[ 	]+jmpq   \*0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <bar1>
+  +[a-f0-9]+:	66 0f 1f 44 00 00    	nopw   0x0\(%rax,%rax,1\)
+ 
+-0+200 <bar2@plt>:
++[a-f0-9]+ <bar2@plt>:
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+- +[a-f0-9]+:	ff 25 36 01 20 00    	jmpq   \*0x200136\(%rip\)        # 200340 <bar2>
++ +[a-f0-9]+:	ff 25 ([0-9a-f]{2} ){4}[ 	]+jmpq   \*0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <bar2>
+  +[a-f0-9]+:	66 0f 1f 44 00 00    	nopw   0x0\(%rax,%rax,1\)
+ 
+ Disassembly of section .text:
+ 
+-0+210 <foo>:
++[a-f0-9]+ <foo>:
+  +[a-f0-9]+:	48 83 ec 08          	sub    \$0x8,%rsp
+- +[a-f0-9]+:	e8 e7 ff ff ff       	callq  200 <bar2@plt>
++ +[a-f0-9]+:	e8 e7 ff ff ff       	callq  [a-f0-9]+ <bar2@plt>
+  +[a-f0-9]+:	48 83 c4 08          	add    \$0x8,%rsp
+- +[a-f0-9]+:	e9 ce ff ff ff       	jmpq   1f0 <bar1@plt>
++ +[a-f0-9]+:	e9 ce ff ff ff       	jmpq   [a-f0-9]+ <bar1@plt>
+ #pass
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-3c.d binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-3c.d
+--- binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-3c.d	2020-04-07 11:32:17.435775250 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-3c.d	2020-04-07 13:34:03.909784017 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-3.s
+ #as: --64 -defsym __64_bit__=1
+-#ld: -shared -m elf_x86_64 -z ibt --hash-style=sysv
++#ld: -shared -m elf_x86_64 -z ibt --hash-style=sysv -z max-page-size=0x200000 -z noseparate-code
+ #objdump: -dw
+ 
+ .*: +file format .*
+@@ -8,36 +8,36 @@
+ 
+ Disassembly of section .plt:
+ 
+-0+290 <.plt>:
+- +[a-f0-9]+:	ff 35 ea 01 20 00    	pushq  0x2001ea\(%rip\)        # 200480 <_GLOBAL_OFFSET_TABLE_\+0x8>
+- +[a-f0-9]+:	f2 ff 25 eb 01 20 00 	bnd jmpq \*0x2001eb\(%rip\)        # 200488 <_GLOBAL_OFFSET_TABLE_\+0x10>
++[a-f0-9]+ <.plt>:
++ +[a-f0-9]+:	ff 35 ([0-9a-f]{2} ){4}[ 	]+pushq  0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <_GLOBAL_OFFSET_TABLE_\+0x8>
++ +[a-f0-9]+:	f2 ff 25 ([0-9a-f]{2} ){4}[ 	]+bnd jmpq \*0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <_GLOBAL_OFFSET_TABLE_\+0x10>
+  +[a-f0-9]+:	0f 1f 00             	nopl   \(%rax\)
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+  +[a-f0-9]+:	68 00 00 00 00       	pushq  \$0x0
+- +[a-f0-9]+:	f2 e9 e1 ff ff ff    	bnd jmpq 290 <.plt>
++ +[a-f0-9]+:	f2 e9 e1 ff ff ff    	bnd jmpq [a-f0-9]+ <.plt>
+  +[a-f0-9]+:	90                   	nop
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+  +[a-f0-9]+:	68 01 00 00 00       	pushq  \$0x1
+- +[a-f0-9]+:	f2 e9 d1 ff ff ff    	bnd jmpq 290 <.plt>
++ +[a-f0-9]+:	f2 e9 d1 ff ff ff    	bnd jmpq [a-f0-9]+ <.plt>
+  +[a-f0-9]+:	90                   	nop
+ 
+ Disassembly of section .plt.sec:
+ 
+-0+2c0 <bar1@plt>:
++[a-f0-9]+ <bar1@plt>:
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+- +[a-f0-9]+:	f2 ff 25 c5 01 20 00 	bnd jmpq \*0x2001c5\(%rip\)        # 200490 <bar1>
++ +[a-f0-9]+:	f2 ff 25 ([0-9a-f]{2} ){4}[ 	]+bnd jmpq \*0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <bar1>
+  +[a-f0-9]+:	0f 1f 44 00 00       	nopl   0x0\(%rax,%rax,1\)
+ 
+-0+2d0 <bar2@plt>:
++[a-f0-9]+ <bar2@plt>:
+  +[a-f0-9]+:	f3 0f 1e fa          	endbr64 
+- +[a-f0-9]+:	f2 ff 25 bd 01 20 00 	bnd jmpq \*0x2001bd\(%rip\)        # 200498 <bar2>
++ +[a-f0-9]+:	f2 ff 25 ([0-9a-f]{2} ){4}[ 	]+bnd jmpq \*0x[a-f0-9]+\(%rip\)        # [a-f0-9]+ <bar2>
+  +[a-f0-9]+:	0f 1f 44 00 00       	nopl   0x0\(%rax,%rax,1\)
+ 
+ Disassembly of section .text:
+ 
+-0+2e0 <foo>:
++[a-f0-9]+ <foo>:
+  +[a-f0-9]+:	48 83 ec 08          	sub    \$0x8,%rsp
+- +[a-f0-9]+:	e8 e7 ff ff ff       	callq  2d0 <bar2@plt>
++ +[a-f0-9]+:	e8 e7 ff ff ff       	callq  [a-f0-9]+ <bar2@plt>
+  +[a-f0-9]+:	48 83 c4 08          	add    \$0x8,%rsp
+- +[a-f0-9]+:	e9 ce ff ff ff       	jmpq   2c0 <bar1@plt>
++ +[a-f0-9]+:	e9 ce ff ff ff       	jmpq   [a-f0-9]+ <bar1@plt>
+ #pass
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-3d-x32.d binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-3d-x32.d
+--- binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-3d-x32.d	2020-04-07 11:32:17.433775264 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-3d-x32.d	2020-04-07 13:34:03.909784017 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-3.s
+ #as: --x32
+-#ld: -shared -m elf32_x86_64 -z ibt --hash-style=sysv
++#ld: -shared -m elf32_x86_64 -z ibt --hash-style=sysv -z max-page-size=0x200000 -z noseparate-code
+ #readelf: -wf -n
+ 
+ Contents of the .eh_frame section:
+@@ -18,21 +18,21 @@ Contents of the .eh_frame section:
+   DW_CFA_nop
+   DW_CFA_nop
+ 
+-0+18 00000014 0000001c FDE cie=00000000 pc=00000210..00000222
+-  DW_CFA_advance_loc: 4 to 00000214
++0+18 00000014 0000001c FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
++  DW_CFA_advance_loc: 4 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 16
+-  DW_CFA_advance_loc: 9 to 0000021d
++  DW_CFA_advance_loc: 9 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 8
+   DW_CFA_nop
+ 
+-0+30 00000020 00000034 FDE cie=00000000 pc=000001c0..000001f0
++0+30 00000020 00000034 FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
+   DW_CFA_def_cfa_offset: 16
+-  DW_CFA_advance_loc: 6 to 000001c6
++  DW_CFA_advance_loc: 6 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 24
+-  DW_CFA_advance_loc: 10 to 000001d0
++  DW_CFA_advance_loc: 10 to [a-f0-9]+
+   DW_CFA_def_cfa_expression \(DW_OP_breg7 \(rsp\): 8; DW_OP_breg16 \(rip\): 0; DW_OP_lit15; DW_OP_and; DW_OP_lit9; DW_OP_ge; DW_OP_lit3; DW_OP_shl; DW_OP_plus\)
+ 
+-0+54 00000010 00000058 FDE cie=00000000 pc=000001f0..00000210
++0+54 00000010 00000058 FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
+   DW_CFA_nop
+   DW_CFA_nop
+   DW_CFA_nop
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-3d.d binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-3d.d
+--- binutils.orig/ld/testsuite/ld-x86-64/ibt-plt-3d.d	2020-04-07 11:32:17.438775228 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/ibt-plt-3d.d	2020-04-07 13:34:03.909784017 +0100
+@@ -1,6 +1,6 @@
+ #source: ibt-plt-3.s
+ #as: --64 -defsym __64_bit__=1
+-#ld: -shared -m elf_x86_64 -z ibt --hash-style=sysv
++#ld: -shared -m elf_x86_64 -z ibt --hash-style=sysv -z max-page-size=0x200000 -z noseparate-code
+ #readelf: -wf -n
+ 
+ Contents of the .eh_frame section:
+@@ -18,25 +18,25 @@ Contents of the .eh_frame section:
+   DW_CFA_nop
+   DW_CFA_nop
+ 
+-0+18 0000000000000014 0000001c FDE cie=00000000 pc=00000000000002e0..00000000000002f2
+-  DW_CFA_advance_loc: 4 to 00000000000002e4
++0+18 0000000000000014 0000001c FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
++  DW_CFA_advance_loc: 4 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 16
+-  DW_CFA_advance_loc: 9 to 00000000000002ed
++  DW_CFA_advance_loc: 9 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 8
+   DW_CFA_nop
+ 
+-0+30 0000000000000024 00000034 FDE cie=00000000 pc=0000000000000290..00000000000002c0
++0+30 0000000000000024 00000034 FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
+   DW_CFA_def_cfa_offset: 16
+-  DW_CFA_advance_loc: 6 to 0000000000000296
++  DW_CFA_advance_loc: 6 to [a-f0-9]+
+   DW_CFA_def_cfa_offset: 24
+-  DW_CFA_advance_loc: 10 to 00000000000002a0
++  DW_CFA_advance_loc: 10 to [a-f0-9]+
+   DW_CFA_def_cfa_expression \(DW_OP_breg7 \(rsp\): 8; DW_OP_breg16 \(rip\): 0; DW_OP_lit15; DW_OP_and; DW_OP_lit10; DW_OP_ge; DW_OP_lit3; DW_OP_shl; DW_OP_plus\)
+   DW_CFA_nop
+   DW_CFA_nop
+   DW_CFA_nop
+   DW_CFA_nop
+ 
+-0+58 0000000000000010 0000005c FDE cie=00000000 pc=00000000000002c0..00000000000002e0
++0+58 0000000000000010 0000005c FDE cie=00000000 pc=[a-f0-9]+\.\.[a-f0-9]+
+   DW_CFA_nop
+   DW_CFA_nop
+   DW_CFA_nop
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/pr23372a-x32.d binutils-2.30/ld/testsuite/ld-x86-64/pr23372a-x32.d
+--- binutils.orig/ld/testsuite/ld-x86-64/pr23372a-x32.d	2020-04-07 11:32:17.435775250 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/pr23372a-x32.d	2020-04-07 13:34:03.909784017 +0100
+@@ -3,3 +3,8 @@
+ #as: --x32
+ #ld: -r -m elf32_x86_64
+ #readelf: -n
++
++Displaying notes found in: .note.gnu.property
++  Owner                 Data size	Description
++  GNU                  0x[0-9a-f]+	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA used: 
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/pr23372a.d binutils-2.30/ld/testsuite/ld-x86-64/pr23372a.d
+--- binutils.orig/ld/testsuite/ld-x86-64/pr23372a.d	2020-04-07 11:32:17.439775221 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/pr23372a.d	2020-04-07 13:34:03.909784017 +0100
+@@ -3,3 +3,8 @@
+ #as: --64 -defsym __64_bit__=1
+ #ld: -r -m elf_x86_64
+ #readelf: -n
++
++Displaying notes found in: .note.gnu.property
++  Owner                 Data size	Description
++  GNU                  0x[0-9a-f]+	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA used: 
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/property-3.r binutils-2.30/ld/testsuite/ld-x86-64/property-3.r
+--- binutils.orig/ld/testsuite/ld-x86-64/property-3.r	2020-04-07 11:32:17.423775337 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/property-3.r	2020-04-07 13:34:03.909784017 +0100
+@@ -3,6 +3,5 @@ Displaying notes found in: .note.gnu.pro
+   Owner                 Data size	Description
+   GNU                  0x[0-9a-f]+	NT_GNU_PROPERTY_TYPE_0
+       Properties: stack size: 0x800000
+-	x86 ISA used: 586, SSE
+ 	x86 ISA needed: i486, 586
+ #pass
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/property-4.r binutils-2.30/ld/testsuite/ld-x86-64/property-4.r
+--- binutils.orig/ld/testsuite/ld-x86-64/property-4.r	2020-04-07 11:32:17.427775308 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/property-4.r	2020-04-07 13:34:03.909784017 +0100
+@@ -3,6 +3,5 @@ Displaying notes found in: .note.gnu.pro
+   Owner                 Data size	Description
+   GNU                  0x[0-9a-f]+	NT_GNU_PROPERTY_TYPE_0
+       Properties: stack size: 0x800000
+-	x86 ISA used: i486, 586, SSE
+ 	x86 ISA needed: i486, 586, SSE
+ #pass
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/property-5.r binutils-2.30/ld/testsuite/ld-x86-64/property-5.r
+--- binutils.orig/ld/testsuite/ld-x86-64/property-5.r	2020-04-07 11:32:17.437775235 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/property-5.r	2020-04-07 13:34:03.909784017 +0100
+@@ -3,6 +3,5 @@ Displaying notes found in: .note.gnu.pro
+   Owner                 Data size	Description
+   GNU                  0x[0-9a-f]+	NT_GNU_PROPERTY_TYPE_0
+       Properties: stack size: 0x900000
+-	x86 ISA used: i486, 586, SSE
+ 	x86 ISA needed: i486, 586, SSE
+ #pass
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/property-x86-ibt3a-x32.d binutils-2.30/ld/testsuite/ld-x86-64/property-x86-ibt3a-x32.d
+--- binutils.orig/ld/testsuite/ld-x86-64/property-x86-ibt3a-x32.d	2020-04-07 11:32:17.429775293 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/property-x86-ibt3a-x32.d	2020-04-07 13:34:03.910784010 +0100
+@@ -1,11 +1,12 @@
+ #source: property-x86-3.s
+ #source: property-x86-ibt.s
+-#as: --x32
++#as: --x32 -mx86-used-note=yes
+ #ld: -r -m elf32_x86_64
+ #readelf: -n
+ 
+ Displaying notes found in: .note.gnu.property
+   Owner                 Data size	Description
+-  GNU                  0x00000018	NT_GNU_PROPERTY_TYPE_0
+-      Properties: x86 ISA used: 586, SSE, SSE3, SSE4_1
+-	x86 ISA needed: i486, 586, SSE2, SSE3
++  GNU                  0x00000024	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA needed: i486, 586, SSE2, SSE3
++	x86 ISA used: <None>
++	x86 feature used: x86
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/property-x86-ibt3a.d binutils-2.30/ld/testsuite/ld-x86-64/property-x86-ibt3a.d
+--- binutils.orig/ld/testsuite/ld-x86-64/property-x86-ibt3a.d	2020-04-07 11:32:17.431775279 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/property-x86-ibt3a.d	2020-04-07 13:34:03.910784010 +0100
+@@ -1,11 +1,12 @@
+ #source: property-x86-3.s
+ #source: property-x86-ibt.s
+-#as: --64 -defsym __64_bit__=1
++#as: --64 -defsym __64_bit__=1 -mx86-used-note=yes
+ #ld: -r -melf_x86_64
+ #readelf: -n
+ 
+ Displaying notes found in: .note.gnu.property
+   Owner                 Data size	Description
+-  GNU                  0x00000020	NT_GNU_PROPERTY_TYPE_0
+-      Properties: x86 ISA used: 586, SSE, SSE3, SSE4_1
+-	x86 ISA needed: i486, 586, SSE2, SSE3
++  GNU                  0x00000030	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA needed: i486, 586, SSE2, SSE3
++	x86 ISA used: <None>
++	x86 feature used: x86
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/property-x86-ibt3b-x32.d binutils-2.30/ld/testsuite/ld-x86-64/property-x86-ibt3b-x32.d
+--- binutils.orig/ld/testsuite/ld-x86-64/property-x86-ibt3b-x32.d	2020-04-07 11:32:17.427775308 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/property-x86-ibt3b-x32.d	2020-04-07 13:34:03.910784010 +0100
+@@ -1,11 +1,12 @@
+ #source: property-x86-ibt.s
+ #source: property-x86-3.s
+-#as: --x32
++#as: --x32 -mx86-used-note=yes
+ #ld: -r -m elf32_x86_64
+ #readelf: -n
+ 
+ Displaying notes found in: .note.gnu.property
+   Owner                 Data size	Description
+-  GNU                  0x00000018	NT_GNU_PROPERTY_TYPE_0
+-      Properties: x86 ISA used: 586, SSE, SSE3, SSE4_1
+-	x86 ISA needed: i486, 586, SSE2, SSE3
++  GNU                  0x00000024	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA needed: i486, 586, SSE2, SSE3
++	x86 ISA used: <None>
++	x86 feature used: x86
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/property-x86-ibt3b.d binutils-2.30/ld/testsuite/ld-x86-64/property-x86-ibt3b.d
+--- binutils.orig/ld/testsuite/ld-x86-64/property-x86-ibt3b.d	2020-04-07 11:32:17.423775337 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/property-x86-ibt3b.d	2020-04-07 13:34:03.910784010 +0100
+@@ -1,11 +1,12 @@
+ #source: property-x86-ibt.s
+ #source: property-x86-3.s
+-#as: --64 -defsym __64_bit__=1
++#as: --64 -defsym __64_bit__=1 -mx86-used-note=yes
+ #ld: -r -melf_x86_64
+ #readelf: -n
+ 
+ Displaying notes found in: .note.gnu.property
+   Owner                 Data size	Description
+-  GNU                  0x00000020	NT_GNU_PROPERTY_TYPE_0
+-      Properties: x86 ISA used: 586, SSE, SSE3, SSE4_1
+-	x86 ISA needed: i486, 586, SSE2, SSE3
++  GNU                  0x00000030	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA needed: i486, 586, SSE2, SSE3
++	x86 ISA used: <None>
++	x86 feature used: x86
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/property-x86-shstk3a-x32.d binutils-2.30/ld/testsuite/ld-x86-64/property-x86-shstk3a-x32.d
+--- binutils.orig/ld/testsuite/ld-x86-64/property-x86-shstk3a-x32.d	2020-04-07 11:32:17.425775323 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/property-x86-shstk3a-x32.d	2020-04-07 13:34:03.910784010 +0100
+@@ -1,11 +1,12 @@
+ #source: property-x86-3.s
+ #source: property-x86-shstk.s
+-#as: --x32
++#as: --x32 -mx86-used-note=yes
+ #ld: -r -m elf32_x86_64
+ #readelf: -n
+ 
+ Displaying notes found in: .note.gnu.property
+   Owner                 Data size	Description
+-  GNU                  0x00000018	NT_GNU_PROPERTY_TYPE_0
+-      Properties: x86 ISA used: 586, SSE, SSE3, SSE4_1
+-	x86 ISA needed: i486, 586, SSE2, SSE3
++  GNU                  0x00000024	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA needed: i486, 586, SSE2, SSE3
++	x86 ISA used: <None>
++	x86 feature used: x86
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/property-x86-shstk3a.d binutils-2.30/ld/testsuite/ld-x86-64/property-x86-shstk3a.d
+--- binutils.orig/ld/testsuite/ld-x86-64/property-x86-shstk3a.d	2020-04-07 11:32:17.427775308 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/property-x86-shstk3a.d	2020-04-07 13:34:03.910784010 +0100
+@@ -1,11 +1,12 @@
+ #source: property-x86-3.s
+ #source: property-x86-shstk.s
+-#as: --64 -defsym __64_bit__=1
++#as: --64 -defsym __64_bit__=1 -mx86-used-note=yes
+ #ld: -r -melf_x86_64
+ #readelf: -n
+ 
+ Displaying notes found in: .note.gnu.property
+   Owner                 Data size	Description
+-  GNU                  0x00000020	NT_GNU_PROPERTY_TYPE_0
+-      Properties: x86 ISA used: 586, SSE, SSE3, SSE4_1
+-	x86 ISA needed: i486, 586, SSE2, SSE3
++  GNU                  0x00000030	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA needed: i486, 586, SSE2, SSE3
++	x86 ISA used: <None>
++	x86 feature used: x86
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/property-x86-shstk3b-x32.d binutils-2.30/ld/testsuite/ld-x86-64/property-x86-shstk3b-x32.d
+--- binutils.orig/ld/testsuite/ld-x86-64/property-x86-shstk3b-x32.d	2020-04-07 11:32:17.423775337 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/property-x86-shstk3b-x32.d	2020-04-07 13:34:03.910784010 +0100
+@@ -1,11 +1,12 @@
+ #source: property-x86-shstk.s
+ #source: property-x86-3.s
+-#as: --x32
++#as: --x32 -mx86-used-note=yes
+ #ld: -r -m elf32_x86_64
+ #readelf: -n
+ 
+ Displaying notes found in: .note.gnu.property
+   Owner                 Data size	Description
+-  GNU                  0x00000018	NT_GNU_PROPERTY_TYPE_0
+-      Properties: x86 ISA used: 586, SSE, SSE3, SSE4_1
+-	x86 ISA needed: i486, 586, SSE2, SSE3
++  GNU                  0x00000024	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA needed: i486, 586, SSE2, SSE3
++	x86 ISA used: <None>
++	x86 feature used: x86
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/property-x86-shstk3b.d binutils-2.30/ld/testsuite/ld-x86-64/property-x86-shstk3b.d
+--- binutils.orig/ld/testsuite/ld-x86-64/property-x86-shstk3b.d	2020-04-07 11:32:17.436775242 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/property-x86-shstk3b.d	2020-04-07 13:34:03.910784010 +0100
+@@ -1,11 +1,12 @@
+ #source: property-x86-shstk.s
+ #source: property-x86-3.s
+-#as: --64 -defsym __64_bit__=1
++#as: --64 -defsym __64_bit__=1 -mx86-used-note=yes
+ #ld: -r -melf_x86_64
+ #readelf: -n
+ 
+ Displaying notes found in: .note.gnu.property
+   Owner                 Data size	Description
+-  GNU                  0x00000020	NT_GNU_PROPERTY_TYPE_0
+-      Properties: x86 ISA used: 586, SSE, SSE3, SSE4_1
+-	x86 ISA needed: i486, 586, SSE2, SSE3
++  GNU                  0x00000030	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA needed: i486, 586, SSE2, SSE3
++	x86 ISA used: <None>
++	x86 feature used: x86
+--- /dev/null	2020-08-20 07:54:24.260993139 +0100
++++ binutils-2.30/gas/testsuite/gas/i386/property-1.s	2020-08-20 15:44:27.696983474 +0100
+@@ -0,0 +1,30 @@
++	.section ".note.gnu.property", "a"
++.ifdef __64_bit__
++	.p2align 3
++.else
++	.p2align 2
++.endif
++	.long 1f - 0f		/* name length.  */
++	.long 3f - 1f		/* data length.  */
++	/* NT_GNU_PROPERTY_TYPE_0 */
++	.long 5			/* note type.  */
++0:
++	.asciz "GNU"		/* vendor name.  */
++1:
++.ifdef __64_bit__
++	.p2align 3
++.else
++	.p2align 2
++.endif
++	/* GNU_PROPERTY_X86_ISA_1_USED */
++	.long 0xc0010000	/* pr_type.  */
++	.long 5f - 4f		/* pr_datasz.  */
++4:
++	.long 0
++5:
++.ifdef __64_bit__
++	.p2align 3
++.else
++	.p2align 2
++.endif
++3:
+--- /dev/null	2020-08-20 07:54:24.260993139 +0100
++++ binutils-2.30/gas/testsuite/gas/i386/property-1.d	2020-08-20 15:44:27.696983474 +0100
+@@ -0,0 +1,8 @@
++#name: i386 property 1
++#as: -mx86-used-note=no --generate-missing-build-notes=no
++#readelf: -n
++
++Displaying notes found in: .note.gnu.property
++[ 	]+Owner[ 	]+Data size[ 	]+Description
++  GNU                  0x[0-9a-f]+	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA used: <None>
+--- /dev/null	2020-08-20 07:54:24.260993139 +0100
++++ binutils-2.30/gas/testsuite/gas/i386/property-2.d	2020-08-20 15:44:34.770964195 +0100
+@@ -0,0 +1,9 @@
++#name: i386 property 2
++#as: -mx86-used-note=yes --generate-missing-build-notes=no
++#readelf: -n
++
++Displaying notes found in: .note.gnu.property
++[ 	]+Owner[ 	]+Data size[ 	]+Description
++  GNU                  0x[0-9a-f]+	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 ISA used: CMOV, SSE, SSE2, SSE3, SSSE3, SSE4_1, SSE4_2, AVX, AVX2, FMA, AVX512F, AVX512CD, AVX512ER, AVX512PF, AVX512VL, AVX512DQ, AVX512BW, AVX512_4FMAPS, AVX512_4VNNIW, AVX512_BITALG, AVX512_IFMA, AVX512_VBMI, AVX512_VBMI2, AVX512_VNNI, AVX512_BF16
++	x86 feature used: x86, x87, MMX, XMM, YMM, ZMM, FXSR, XSAVE, XSAVEOPT, XSAVEC
+--- /dev/null	2020-08-20 07:54:24.260993139 +0100
++++ binutils-2.30/gas/testsuite/gas/i386/property-2.s	2020-08-20 15:44:34.770964195 +0100
+@@ -0,0 +1,32 @@
++	.text
++	fsin
++	movq		%mm0, %mm1
++	fxsave		(%eax)
++	xsave		(%eax)
++	xsaveopt	(%eax)
++	xsavec		(%eax)
++	cmove		%eax,%ebx
++	movaps		%xmm0, %xmm1
++	movapd		%xmm0, %xmm1
++	mwait
++	psignb		%xmm0, %xmm1
++	blendvpd	%xmm0, %xmm1
++	pcmpgtq		%xmm0, %xmm1
++	vmovaps		%xmm0, %xmm1
++	vpabsb		%ymm0, %ymm1
++	vfmadd231ps	%ymm0, %ymm1, %ymm1
++	vmovaps		%zmm0, %zmm1
++	vplzcntd	%zmm0, %zmm1
++	vrsqrt28pd	%zmm0, %zmm1
++	vscatterpf0dpd	(%eax,%ymm1){%k1}
++	{evex} vpmovzxdq %xmm0, %xmm1
++	vandnpd		%zmm0, %zmm0, %zmm1
++	vpmaxuw		%zmm0, %zmm0, %zmm1
++	v4fnmaddss	(%ecx), %xmm4, %xmm1
++	vpopcntb	%zmm0, %zmm1
++	vp4dpwssd	(%ecx), %zmm0, %zmm1
++	vpmadd52luq	(%ecx), %zmm0, %zmm1
++	vpermt2b	(%ecx), %zmm0, %zmm1
++	vpcompressb	%zmm0, %zmm1
++	vpdpwssds	(%ecx), %zmm0, %zmm1
++	vcvtne2ps2bf16	(%ecx), %zmm0, %zmm1
+--- /dev/null	2020-08-20 07:54:24.260993139 +0100
++++ binutils-2.30/ld/testsuite/ld-elf/pr23900-1-32.rd	2020-08-20 15:46:11.850699543 +0100
+@@ -0,0 +1,14 @@
++#source: pr23900-1.s
++#ld:
++#readelf: -l --wide
++#target: *-*-linux* *-*-gnu* *-*-nacl*
++
++#...
++  GNU_PROPERTY .* +0x4
++#...
++ +[0-9]+ +.*\ \.note\.gnu\.property .*
++#...
++ +[0-9]+ +\.note\.gnu\.property 
++#...
++ +[0-9]+ +\.note\.gnu\.property 
++#...
+--- /dev/null	2020-08-20 07:54:24.260993139 +0100
++++ binutils-2.30/ld/testsuite/ld-elf/pr23900-1-64.rd	2020-08-20 15:46:16.968685596 +0100
+@@ -0,0 +1,14 @@
++#source: pr23900-1.s
++#ld:
++#readelf: -l --wide
++#target: *-*-linux* *-*-gnu* *-*-nacl*
++
++#...
++  GNU_PROPERTY .* +0x8
++#...
++ +[0-9]+ +.*\ \.note\.gnu\.property .*
++#...
++ +[0-9]+ +\.note\.gnu\.property 
++#...
++ +[0-9]+ +\.note\.gnu\.property 
++#...
+--- /dev/null	2020-08-20 07:54:24.260993139 +0100
++++ binutils-2.30/ld/testsuite/ld-elf/pr23900-1.d	2020-08-20 15:46:26.546659490 +0100
+@@ -0,0 +1,16 @@
++#ld:
++#readelf: --notes --wide -l
++#target: *-*-linux* *-*-gnu* *-*-nacl*
++
++#...
++  GNU_PROPERTY .*
++#...
++ +[0-9]+ +.*\.note\.gnu\.property.*
++#...
++ +[0-9]+ +\.note\.gnu\.property 
++#...
++ +[0-9]+ +\.note\.gnu\.property 
++#...
++Displaying notes found in: \.note\.gnu\.property
++[ 	]+Owner[ 	]+Data size[ 	]+Description
++[ 	]+GNU[ 	]+0x0+..[ 	]+NT_GNU_PROPERTY_TYPE_0[ 	]+Properties: no copy on protected 
+--- /dev/null	2020-08-20 07:54:24.260993139 +0100
++++ binutils-2.30/ld/testsuite/ld-elf/pr23900-1.s	2020-08-20 15:46:30.072649878 +0100
+@@ -0,0 +1,30 @@
++	.text
++	.global start	/* Used by SH targets.  */
++start:
++	.global _start
++_start:
++	.global __start
++__start:
++	.global main	/* Used by HPPA targets.  */
++main:
++	.globl	_main	/* Used by LynxOS targets.  */
++_main:
++	.dc.a 0
++
++	.section .note.gnu.property, "a"
++	.p2align ALIGN
++	.dc.l .L1 - .L0		/* name length.  */
++	.dc.l .L3 - .L1		/* data length.  */
++	/* NT_GNU_PROPERTY_TYPE_0 */
++	.dc.l 5			/* note type.  */
++.L0:
++	.asciz "GNU"		/* vendor name.  */
++.L1:
++	.p2align ALIGN
++	/* GNU_PROPERTY_NO_COPY_ON_PROTECTED */
++	.dc.l 2			/* pr_type.  */
++	.dc.l .L5 - .L4		/* pr_datasz.  */
++.L4:
++.L5:
++	.p2align ALIGN
++.L3:
+--- /dev/null	2020-08-20 07:54:24.260993139 +0100
++++ binutils-2.30/ld/testsuite/ld-elf/pr23900-2.s	2020-08-20 15:46:36.328632828 +0100
+@@ -0,0 +1,32 @@
++	.text
++	.global start	/* Used by SH targets.  */
++start:
++	.global _start
++_start:
++	.global __start
++__start:
++	.global main	/* Used by HPPA targets.  */
++main:
++	.globl	_main	/* Used by LynxOS targets.  */
++_main:
++	.dc.a 0
++
++	/* NB: Deliberately incorrect section name.  Should be
++	       .note.gnu.property.  */
++	.section .note, "a"
++	.p2align ALIGN
++	.dc.l .L1 - .L0		/* name length.  */
++	.dc.l .L3 - .L1		/* data length.  */
++	/* NT_GNU_PROPERTY_TYPE_0 */
++	.dc.l 5			/* note type.  */
++.L0:
++	.asciz "GNU"		/* vendor name.  */
++.L1:
++	.p2align ALIGN
++	/* GNU_PROPERTY_NO_COPY_ON_PROTECTED */
++	.dc.l 2			/* pr_type.  */
++	.dc.l .L5 - .L4		/* pr_datasz.  */
++.L4:
++.L5:
++	.p2align ALIGN
++.L3:
+--- /dev/null	2020-08-20 07:54:24.260993139 +0100
++++ binutils-2.30/ld/testsuite/ld-elf/pr23900-2a.d	2020-08-20 15:46:42.642615623 +0100
+@@ -0,0 +1,9 @@
++#source: pr23900-2.s
++#ld:
++#readelf: --notes --wide
++#target: *-*-linux* *-*-gnu* *-*-nacl*
++
++#...
++Displaying notes found in: \.note
++[ 	]+Owner[ 	]+Data size[ 	]+Description
++[ 	]+GNU[ 	]+0x0+..[ 	]+NT_GNU_PROPERTY_TYPE_0[ 	]+Properties: no copy on protected 
+--- /dev/null	2020-08-20 07:54:24.260993139 +0100
++++ binutils-2.30/ld/testsuite/ld-elf/pr23900-2b.d	2020-08-20 15:46:48.738599006 +0100
+@@ -0,0 +1,9 @@
++#source: pr23900-2.s
++#ld:
++#readelf: -l --wide
++#target: *-*-linux* *-*-gnu* *-*-nacl*
++
++#failif
++#...
++  GNU_PROPERTY .*
++#...
+--- /dev/null	2020-08-20 07:54:24.260993139 +0100
++++ binutils-2.30/ld/testsuite/ld-elf/stack-noexec.rd	2020-08-20 15:46:59.907568567 +0100
+@@ -0,0 +1,3 @@
++#...
++  GNU_STACK      0x0+00000 0x0+000000 0x0+000000 0x0+000 0x.+0000 RW  0x[0-9a-f]+
++#pass
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/property-3.r binutils-2.30/ld/testsuite/ld-x86-64/property-3.r
+--- binutils.orig/ld/testsuite/ld-x86-64/property-3.r	2020-08-21 10:21:01.138676431 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/property-3.r	2020-08-21 10:47:30.373599165 +0100
+@@ -3,5 +3,5 @@ Displaying notes found in: .note.gnu.pro
+   Owner                 Data size	Description
+   GNU                  0x[0-9a-f]+	NT_GNU_PROPERTY_TYPE_0
+       Properties: stack size: 0x800000
+-	x86 ISA needed: i486, 586
++	x86 ISA needed: i486, 58.*
+ #pass
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/property-4.r binutils-2.30/ld/testsuite/ld-x86-64/property-4.r
+--- binutils.orig/ld/testsuite/ld-x86-64/property-4.r	2020-08-21 10:21:01.122676481 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/property-4.r	2020-08-21 10:49:39.940182100 +0100
+@@ -3,5 +3,5 @@ Displaying notes found in: .note.gnu.pro
+   Owner                 Data size	Description
+   GNU                  0x[0-9a-f]+	NT_GNU_PROPERTY_TYPE_0
+       Properties: stack size: 0x800000
+-	x86 ISA needed: i486, 586, SSE
++	x86 ISA needed: i486, 586, SS.*
+ #pass
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/property-5.r binutils-2.30/ld/testsuite/ld-x86-64/property-5.r
+--- binutils.orig/ld/testsuite/ld-x86-64/property-5.r	2020-08-21 10:21:01.127676465 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/property-5.r	2020-08-21 10:50:06.198097582 +0100
+@@ -3,5 +3,5 @@ Displaying notes found in: .note.gnu.pro
+   Owner                 Data size	Description
+   GNU                  0x[0-9a-f]+	NT_GNU_PROPERTY_TYPE_0
+       Properties: stack size: 0x900000
+-	x86 ISA needed: i486, 586, SSE
++	x86 ISA needed: i486, 586, SS.*
+ #pass

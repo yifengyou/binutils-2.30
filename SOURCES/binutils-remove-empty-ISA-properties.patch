@@ -1,0 +1,314 @@
+diff -rup binutils.orig/bfd/elfxx-x86.c binutils-2.30/bfd/elfxx-x86.c
+--- binutils.orig/bfd/elfxx-x86.c	2018-07-30 16:01:04.881710127 +0100
++++ binutils-2.30/bfd/elfxx-x86.c	2018-07-30 16:01:28.809447800 +0100
+@@ -2320,13 +2320,34 @@ _bfd_x86_elf_merge_gnu_properties (struc
+ 	{
+ 	  number = aprop->u.number;
+ 	  aprop->u.number = number | bprop->u.number;
+-	  updated = number != (unsigned int) aprop->u.number;
++	  /* Remove the property if ISA bits are empty.  */
++	  if (aprop->u.number == 0)
++	    {
++	      aprop->pr_kind = property_remove;
++	      updated = TRUE;
++	    }
++	  else
++	    updated = number != (unsigned int) aprop->u.number;
+ 	}
+       else
+ 	{
+-	  /* Return TRUE if APROP is NULL to indicate that BPROP should
+-	     be added to ABFD.  */
+-	  updated = aprop == NULL;
++	  /* Only one of APROP and BPROP can be NULL.  */
++	  if (aprop != NULL)
++	    {
++	      if (aprop->u.number == 0)
++		{
++		  /* Remove APROP if ISA bits are empty.  */
++		  aprop->pr_kind = property_remove;
++		  updated = TRUE;
++		}
++	    }
++	  else
++	    {
++	      /* Return TRUE if APROP is NULL and ISA bits of BPROP
++		 aren't empty to indicate that BPROP should be added
++		 to ABFD.  */
++	      updated = bprop->u.number != 0;
++	    }
+ 	}
+       break;
+ 
+diff -rup binutils.orig/ld/testsuite/ld-i386/i386.exp binutils-2.30/ld/testsuite/ld-i386/i386.exp
+--- binutils.orig/ld/testsuite/ld-i386/i386.exp	2018-07-30 16:00:54.241826775 +0100
++++ binutils-2.30/ld/testsuite/ld-i386/i386.exp	2018-07-30 16:02:58.911459984 +0100
+@@ -450,6 +450,8 @@ run_dump_test "pr22115-1b"
+ run_dump_test "pr22115-1c"
+ run_dump_test "pr22115-1d"
+ run_dump_test "pr22135"
++run_dump_test "pr23372a"
++run_dump_test "pr23372b"
+ 
+ if { !([istarget "i?86-*-linux*"]
+        || [istarget "i?86-*-gnu*"]
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/x86-64.exp binutils-2.30/ld/testsuite/ld-x86-64/x86-64.exp
+--- binutils.orig/ld/testsuite/ld-x86-64/x86-64.exp	2018-07-30 16:00:55.340814726 +0100
++++ binutils-2.30/ld/testsuite/ld-x86-64/x86-64.exp	2018-07-30 16:03:32.624090383 +0100
+@@ -379,6 +379,10 @@ run_dump_test "pr22115-1c-x32"
+ run_dump_test "pr22115-1d"
+ run_dump_test "pr22115-1d-x32"
+ run_dump_test "pr22135"
++run_dump_test "pr23372a"
++run_dump_test "pr23372a-x32"
++run_dump_test "pr23372b"
++run_dump_test "pr23372b-x32"
+ 
+ if { ![istarget "x86_64-*-linux*"] && ![istarget "x86_64-*-nacl*"]} {
+     return
+diff --git a/ld/testsuite/ld-i386/pr23372a.d b/ld/testsuite/ld-i386/pr23372a.d
+new file mode 100644
+index 0000000000..b75523bdc3
+--- /dev/null
++++ b/ld/testsuite/ld-i386/pr23372a.d
+@@ -0,0 +1,5 @@
++#source: pr23372a.s
++#source: pr23372b.s
++#as: --32
++#ld: -r -m elf_i386
++#readelf: -n
+diff --git a/ld/testsuite/ld-i386/pr23372a.s b/ld/testsuite/ld-i386/pr23372a.s
+new file mode 100644
+index 0000000000..9849d620a1
+--- /dev/null
++++ b/ld/testsuite/ld-i386/pr23372a.s
+@@ -0,0 +1,18 @@
++	.section ".note.gnu.property", "a"
++	.p2align 2
++	.long 1f - 0f		/* name length.  */
++	.long 4f - 1f		/* data length.  */
++	/* NT_GNU_PROPERTY_TYPE_0 */
++	.long 5			/* note type.  */
++0:
++	.asciz "GNU"		/* vendor name.  */
++1:
++	.p2align 2
++	/* GNU_PROPERTY_X86_ISA_1_USED */
++	.long 0xc0000000	/* pr_type.  */
++	.long 3f - 2f		/* pr_datasz.  */
++2:
++	.long 0x0
++3:
++	.p2align 2
++4:
+diff --git a/ld/testsuite/ld-i386/pr23372b.d b/ld/testsuite/ld-i386/pr23372b.d
+new file mode 100644
+index 0000000000..a8e9c819a4
+--- /dev/null
++++ b/ld/testsuite/ld-i386/pr23372b.d
+@@ -0,0 +1,5 @@
++#source: pr23372a.s
++#source: pr23372c.s
++#as: --32
++#ld: -r -m elf_i386
++#readelf: -n
+diff --git a/ld/testsuite/ld-i386/pr23372b.s b/ld/testsuite/ld-i386/pr23372b.s
+new file mode 100644
+index 0000000000..9849d620a1
+--- /dev/null
++++ b/ld/testsuite/ld-i386/pr23372b.s
+@@ -0,0 +1,18 @@
++	.section ".note.gnu.property", "a"
++	.p2align 2
++	.long 1f - 0f		/* name length.  */
++	.long 4f - 1f		/* data length.  */
++	/* NT_GNU_PROPERTY_TYPE_0 */
++	.long 5			/* note type.  */
++0:
++	.asciz "GNU"		/* vendor name.  */
++1:
++	.p2align 2
++	/* GNU_PROPERTY_X86_ISA_1_USED */
++	.long 0xc0000000	/* pr_type.  */
++	.long 3f - 2f		/* pr_datasz.  */
++2:
++	.long 0x0
++3:
++	.p2align 2
++4:
+diff --git a/ld/testsuite/ld-i386/pr23372c.s b/ld/testsuite/ld-i386/pr23372c.s
+new file mode 100644
+index 0000000000..3470dce649
+--- /dev/null
++++ b/ld/testsuite/ld-i386/pr23372c.s
+@@ -0,0 +1,18 @@
++	.section ".note.gnu.property", "a"
++	.p2align 2
++	.long 1f - 0f		/* name length.  */
++	.long 4f - 1f		/* data length.  */
++	/* NT_GNU_PROPERTY_TYPE_0 */
++	.long 5			/* note type.  */
++0:
++	.asciz "GNU"		/* vendor name.  */
++1:
++	.p2align 2
++	/* GNU_PROPERTY_X86_ISA_1_NEEDED */
++	.long 0xc0000001	/* pr_type.  */
++	.long 3f - 2f		/* pr_datasz.  */
++2:
++	.long 0x0
++3:
++	.p2align 2
++4:
+diff --git a/ld/testsuite/ld-x86-64/pr23372a-x32.d b/ld/testsuite/ld-x86-64/pr23372a-x32.d
+new file mode 100644
+index 0000000000..9f93642364
+--- /dev/null
++++ b/ld/testsuite/ld-x86-64/pr23372a-x32.d
+@@ -0,0 +1,5 @@
++#source: pr23372a.s
++#source: pr23372b.s
++#as: --x32
++#ld: -r -m elf32_x86_64
++#readelf: -n
+diff --git a/ld/testsuite/ld-x86-64/pr23372a.d b/ld/testsuite/ld-x86-64/pr23372a.d
+new file mode 100644
+index 0000000000..ee688fc2e2
+--- /dev/null
++++ b/ld/testsuite/ld-x86-64/pr23372a.d
+@@ -0,0 +1,5 @@
++#source: pr23372a.s
++#source: pr23372b.s
++#as: --64 -defsym __64_bit__=1
++#ld: -r -m elf_x86_64
++#readelf: -n
+diff --git a/ld/testsuite/ld-x86-64/pr23372a.s b/ld/testsuite/ld-x86-64/pr23372a.s
+new file mode 100644
+index 0000000000..639fc26de4
+--- /dev/null
++++ b/ld/testsuite/ld-x86-64/pr23372a.s
+@@ -0,0 +1,30 @@
++	.section ".note.gnu.property", "a"
++.ifdef __64_bit__
++	.p2align 3
++.else
++	.p2align 2
++.endif
++	.long 1f - 0f		/* name length.  */
++	.long 4f - 1f		/* data length.  */
++	/* NT_GNU_PROPERTY_TYPE_0 */
++	.long 5			/* note type.  */
++0:
++	.asciz "GNU"		/* vendor name.  */
++1:
++.ifdef __64_bit__
++	.p2align 3
++.else
++	.p2align 2
++.endif
++	/* GNU_PROPERTY_X86_ISA_1_USED */
++	.long 0xc0000000	/* pr_type.  */
++	.long 3f - 2f		/* pr_datasz.  */
++2:
++	.long 0x0
++3:
++.ifdef __64_bit__
++	.p2align 3
++.else
++	.p2align 2
++.endif
++4:
+diff --git a/ld/testsuite/ld-x86-64/pr23372b-x32.d b/ld/testsuite/ld-x86-64/pr23372b-x32.d
+new file mode 100644
+index 0000000000..5b0cf98618
+--- /dev/null
++++ b/ld/testsuite/ld-x86-64/pr23372b-x32.d
+@@ -0,0 +1,5 @@
++#source: pr23372a.s
++#source: pr23372c.s
++#as: --x32
++#ld: -r -m elf32_x86_64
++#readelf: -n
+diff --git a/ld/testsuite/ld-x86-64/pr23372b.d b/ld/testsuite/ld-x86-64/pr23372b.d
+new file mode 100644
+index 0000000000..727afa8ab5
+--- /dev/null
++++ b/ld/testsuite/ld-x86-64/pr23372b.d
+@@ -0,0 +1,5 @@
++#source: pr23372a.s
++#source: pr23372c.s
++#as: --64 -defsym __64_bit__=1
++#ld: -r -m elf_x86_64
++#readelf: -n
+diff --git a/ld/testsuite/ld-x86-64/pr23372b.s b/ld/testsuite/ld-x86-64/pr23372b.s
+new file mode 100644
+index 0000000000..639fc26de4
+--- /dev/null
++++ b/ld/testsuite/ld-x86-64/pr23372b.s
+@@ -0,0 +1,30 @@
++	.section ".note.gnu.property", "a"
++.ifdef __64_bit__
++	.p2align 3
++.else
++	.p2align 2
++.endif
++	.long 1f - 0f		/* name length.  */
++	.long 4f - 1f		/* data length.  */
++	/* NT_GNU_PROPERTY_TYPE_0 */
++	.long 5			/* note type.  */
++0:
++	.asciz "GNU"		/* vendor name.  */
++1:
++.ifdef __64_bit__
++	.p2align 3
++.else
++	.p2align 2
++.endif
++	/* GNU_PROPERTY_X86_ISA_1_USED */
++	.long 0xc0000000	/* pr_type.  */
++	.long 3f - 2f		/* pr_datasz.  */
++2:
++	.long 0x0
++3:
++.ifdef __64_bit__
++	.p2align 3
++.else
++	.p2align 2
++.endif
++4:
+diff --git a/ld/testsuite/ld-x86-64/pr23372c.s b/ld/testsuite/ld-x86-64/pr23372c.s
+new file mode 100644
+index 0000000000..b4eaf69777
+--- /dev/null
++++ b/ld/testsuite/ld-x86-64/pr23372c.s
+@@ -0,0 +1,30 @@
++	.section ".note.gnu.property", "a"
++.ifdef __64_bit__
++	.p2align 3
++.else
++	.p2align 2
++.endif
++	.long 1f - 0f		/* name length.  */
++	.long 4f - 1f		/* data length.  */
++	/* NT_GNU_PROPERTY_TYPE_0 */
++	.long 5			/* note type.  */
++0:
++	.asciz "GNU"		/* vendor name.  */
++1:
++.ifdef __64_bit__
++	.p2align 3
++.else
++	.p2align 2
++.endif
++	/* GNU_PROPERTY_X86_ISA_1_NEEDED */
++	.long 0xc0000001	/* pr_type.  */
++	.long 3f - 2f		/* pr_datasz.  */
++2:
++	.long 0x0
++3:
++.ifdef __64_bit__
++	.p2align 3
++.else
++	.p2align 2
++.endif
++4:

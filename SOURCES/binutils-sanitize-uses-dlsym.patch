@@ -1,0 +1,11 @@
+diff -rup binutils.orig/config/plugins.m4 binutils-2.30/config/plugins.m4
+--- binutils.orig/config/plugins.m4	2019-02-18 16:11:38.392440473 +0000
++++ binutils-2.30/config/plugins.m4	2019-02-18 16:11:44.715393846 +0000
+@@ -16,6 +16,6 @@ AC_DEFUN([AC_PLUGINS],
+     [plugins=$maybe_plugins]
+   )
+   if test "$plugins" = "yes"; then
+-    AC_SEARCH_LIBS([dlopen], [dl])
++    AC_SEARCH_LIBS([dlsym], [dl])
+   fi
+ ])

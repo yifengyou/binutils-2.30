@@ -1,0 +1,210 @@
+# Do not enable IBT when an object file contains code but no GNU Property notes.  (#1687774)
+
+diff -rup binutils.orig/bfd/elfxx-x86.c binutils-2.30/bfd/elfxx-x86.c
+--- binutils.orig/bfd/elfxx-x86.c	2019-03-13 10:19:07.715406452 +0000
++++ binutils-2.30/bfd/elfxx-x86.c	2019-03-13 10:20:01.255975385 +0000
+@@ -2377,6 +2377,9 @@ _bfd_x86_elf_merge_gnu_properties (struc
+ 	}
+       else
+ 	{
++	  /* There should be no AND properties since some input doesn't
++	     have them.  Set IBT and SHSTK properties for -z ibt and -z
++	     shstk if needed.  */
+ 	  features = 0;
+ 	  if (info->ibt)
+ 	    features = GNU_PROPERTY_X86_FEATURE_1_IBT;
+@@ -2384,18 +2387,15 @@ _bfd_x86_elf_merge_gnu_properties (struc
+ 	    features |= GNU_PROPERTY_X86_FEATURE_1_SHSTK;
+ 	  if (features)
+ 	    {
+-	      /* Add GNU_PROPERTY_X86_FEATURE_1_IBT and
+-		 GNU_PROPERTY_X86_FEATURE_1_SHSTK.  */
+ 	      if (aprop != NULL)
+ 		{
+-		  number = aprop->u.number;
+-		  aprop->u.number = number | features;
+-		  updated = number != (unsigned int) aprop->u.number;
++		  updated = features != (unsigned int) aprop->u.number;
++		  aprop->u.number = features;
+ 		}
+ 	      else
+ 		{
+-		  bprop->u.number |= features;
+ 		  updated = TRUE;
++		  bprop->u.number = features;
+ 		}
+ 	    }
+ 	  else if (aprop != NULL)
+diff -rup binutils.orig/ld/testsuite/ld-i386/i386.exp binutils-2.30/ld/testsuite/ld-i386/i386.exp
+--- binutils.orig/ld/testsuite/ld-i386/i386.exp	2019-03-13 10:19:07.258410131 +0000
++++ binutils-2.30/ld/testsuite/ld-i386/i386.exp	2019-03-13 10:20:32.995719837 +0000
+@@ -473,6 +473,8 @@ run_dump_test "pr18815"
+ run_dump_test "pr19939a"
+ run_dump_test "pr19939b"
+ run_dump_test "tlsdesc2"
++run_dump_test "pr24322a"
++run_dump_test "pr24322b"
+ 
+ proc undefined_weak {cflags ldflags} {
+     set testname "Undefined weak symbol"
+diff -rup binutils.orig/ld/testsuite/ld-x86-64/x86-64.exp binutils-2.30/ld/testsuite/ld-x86-64/x86-64.exp
+--- binutils.orig/ld/testsuite/ld-x86-64/x86-64.exp	2019-03-13 10:19:07.323409608 +0000
++++ binutils-2.30/ld/testsuite/ld-x86-64/x86-64.exp	2019-03-13 10:21:11.938406302 +0000
+@@ -593,6 +593,10 @@ run_dump_test "pr20253-5a"
+ run_dump_test "pr20253-5b"
+ run_dump_test "tlsdesc2"
+ run_dump_test "pr22048"
++run_dump_test "pr24322a"
++run_dump_test "pr24322a-x32"
++run_dump_test "pr24322b"
++run_dump_test "pr24322b-x32"
+ 
+ proc undefined_weak {cflags ldflags} {
+     set testname "Undefined weak symbol"
+--- /dev/null	2019-03-13 08:01:41.976955507 +0000
++++ binutils-2.30/ld/testsuite/ld-i386/pr24322a.d	2019-03-13 11:05:58.557068529 +0000
+@@ -0,0 +1,11 @@
++#source: ../ld-x86-64/pr24322a.s
++#source: ../ld-x86-64/pr24322b.s
++#as: --32 
++#ld: -z shstk -m elf_i386
++#readelf: -n
++
++Displaying notes found in: .note.gnu.property
++  Owner                 Data size	Description
++  GNU                  0x000000..	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 feature: SHSTK
++
+--- /dev/null	2019-03-13 08:01:41.976955507 +0000
++++ binutils-2.30/ld/testsuite/ld-i386/pr24322b.d	2019-03-13 11:07:19.837414751 +0000
+@@ -0,0 +1,11 @@
++#source: ../ld-x86-64/pr24322c.s
++#source: ../ld-x86-64/pr24322b.s
++#as: --32 
++#ld: -z shstk -m elf_i386
++#readelf: -n
++
++Displaying notes found in: .note.gnu.property
++  Owner                 Data size	Description
++  GNU                  0x000000..	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 feature: SHSTK
++
+--- /dev/null	2019-03-13 08:01:41.976955507 +0000
++++ binutils-2.30/ld/testsuite/ld-x86-64/pr24322a.s	2019-03-13 10:20:01.256975377 +0000
+@@ -0,0 +1,27 @@
++	.section ".note.gnu.property", "a"
++.ifdef __64_bit__
++	.p2align 3
++.else
++	.p2align 2
++.endif
++	.long 1f - 0f		/* name length */
++	.long 5f - 2f		/* data length */
++	.long 5			/* note type */
++0:	.asciz "GNU"		/* vendor name */
++1:
++.ifdef __64_bit__
++	.p2align 3
++.else
++	.p2align 2
++.endif
++2:	.long 0xc0000002	/* pr_type.  */
++	.long 4f - 3f		/* pr_datasz.  */
++3:
++	.long 0x3
++4:
++.ifdef __64_bit__
++	.p2align 3
++.else
++	.p2align 2
++.endif
++5:
+--- /dev/null	2019-03-13 08:01:41.976955507 +0000
++++ binutils-2.30/ld/testsuite/ld-x86-64/pr24322a.d	2019-03-13 11:07:47.228194433 +0000
+@@ -0,0 +1,10 @@
++#source: pr24322a.s
++#source: pr24322b.s
++#as: --64 -defsym __64_bit__=1
++#ld: -z shstk -melf_x86_64
++#readelf: -n
++
++Displaying notes found in: .note.gnu.property
++  Owner                 Data size	Description
++  GNU                  0x000000..	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 feature: SHSTK
+--- /dev/null	2019-03-13 08:01:41.976955507 +0000
++++ binutils-2.30/ld/testsuite/ld-x86-64/pr24322a-x32.d	2019-03-13 11:10:46.635235620 +0000
+@@ -0,0 +1,10 @@
++#source: pr24322a.s
++#source: pr24322b.s
++#as: --x32
++#ld: -z shstk -m elf32_x86_64
++#readelf: -n
++
++Displaying notes found in: .note.gnu.property
++  Owner                 Data size	Description
++  GNU                  0x000000..	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 feature: SHSTK
+--- /dev/null	2019-03-13 08:01:41.976955507 +0000
++++ binutils-2.30/ld/testsuite/ld-x86-64/pr24322b.s	2019-03-13 10:20:01.257975369 +0000
+@@ -0,0 +1,4 @@
++	.text
++	.global _start
++_start:
++	ret
+--- /dev/null	2019-03-13 08:01:41.976955507 +0000
++++ binutils-2.30/ld/testsuite/ld-x86-64/pr24322b.d	2019-03-13 11:08:03.948059948 +0000
+@@ -0,0 +1,10 @@
++#source: pr24322c.s
++#source: pr24322b.s
++#as: --64 -defsym __64_bit__=1
++#ld: -z shstk -melf_x86_64
++#readelf: -n
++
++Displaying notes found in: .note.gnu.property
++  Owner                 Data size	Description
++  GNU                  0x000000..	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 feature: SHSTK
+--- /dev/null	2019-03-13 08:01:41.976955507 +0000
++++ binutils-2.30/ld/testsuite/ld-x86-64/pr24322b-x32.d	2019-03-13 11:13:13.626524410 +0000
+@@ -0,0 +1,10 @@
++#source: pr24322c.s
++#source: pr24322b.s
++#as: --x32
++#ld: -z shstk -m elf32_x86_64
++#readelf: -n
++
++Displaying notes found in: .note.gnu.property
++  Owner                 Data size	Description
++  GNU                  0x000000..	NT_GNU_PROPERTY_TYPE_0
++      Properties: x86 feature: SHSTK
+--- /dev/null	2019-03-13 08:01:41.976955507 +0000
++++ binutils-2.30/ld/testsuite/ld-x86-64/pr24322c.s	2019-03-13 10:20:01.257975369 +0000
+@@ -0,0 +1,27 @@
++	.section ".note.gnu.property", "a"
++.ifdef __64_bit__
++	.p2align 3
++.else
++	.p2align 2
++.endif
++	.long 1f - 0f		/* name length */
++	.long 5f - 2f		/* data length */
++	.long 5			/* note type */
++0:	.asciz "GNU"		/* vendor name */
++1:
++.ifdef __64_bit__
++	.p2align 3
++.else
++	.p2align 2
++.endif
++2:	.long 0xc0000002	/* pr_type.  */
++	.long 4f - 3f		/* pr_datasz.  */
++3:
++	.long 0x0
++4:
++.ifdef __64_bit__
++	.p2align 3
++.else
++	.p2align 2
++.endif
++5:

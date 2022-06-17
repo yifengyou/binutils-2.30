@@ -1,0 +1,28 @@
+diff -rup binutils-2.30/bfd/elflink.c binutils.new/bfd/elflink.c
+--- binutils-2.30/bfd/elflink.c	2021-12-09 09:05:54.545468003 +0000
++++ binutils.new/bfd/elflink.c	2021-12-09 09:03:15.366632301 +0000
+@@ -9980,7 +9980,7 @@ elf_link_output_extsym (struct bfd_hash_
+ 	      if (h->verinfo.verdef == NULL
+ 		  || (elf_dyn_lib_class (h->verinfo.verdef->vd_bfd)
+ 		      & (DYN_AS_NEEDED | DYN_DT_NEEDED | DYN_NO_NEEDED)))
+-		iversym.vs_vers = 0;
++		iversym.vs_vers = 1;
+ 	      else
+ 		iversym.vs_vers = h->verinfo.verdef->vd_exp_refno + 1;
+ 	    }
+diff -rup binutils-2.30/ld/testsuite/ld-elfvers/vers16.dsym binutils.new/ld/testsuite/ld-elfvers/vers16.dsym
+--- binutils-2.30/ld/testsuite/ld-elfvers/vers16.dsym	2018-01-13 13:31:16.000000000 +0000
++++ binutils.new/ld/testsuite/ld-elfvers/vers16.dsym	2021-12-09 09:05:03.730791511 +0000
+@@ -1,2 +1,2 @@
+ [0-9a-f]+ g +DF (\.text|\.opd|\*ABS\*)	[0-9a-f]+( +Base +)? (0x[0-9a-f]+ )?_?show_bar
+-[0-9a-f]+ +DF \*UND\*	[0-9a-f]+ +(0x[0-9a-f]+ )?_?show_foo
++[0-9a-f]+ +DF \*UND\*	[0-9a-f]+ +Base +(0x[0-9a-f]+ )?_?show_foo
+diff -rup binutils-2.30/ld/testsuite/ld-elfvers/vers6.dsym binutils.new/ld/testsuite/ld-elfvers/vers6.dsym
+--- binutils-2.30/ld/testsuite/ld-elfvers/vers6.dsym	2018-01-13 13:31:16.000000000 +0000
++++ binutils.new/ld/testsuite/ld-elfvers/vers6.dsym	2021-12-09 09:04:45.778917378 +0000
+@@ -1,4 +1,4 @@
+-[0-9a-f]+ +DF \*UND\*	[0-9a-f]+ +(0x[0-9a-f]+ )?_?show_foo
++[0-9a-f]+ +DF \*UND\*	[0-9a-f]+ +Base +(0x[0-9a-f]+ )?_?show_foo
+ [0-9a-f]+ +DF \*UND\*	[0-9a-f]+ +VERS_2.0 +(0x[0-9a-f]+ )?_?show_foo
+ [0-9a-f]+ +DF \*UND\*	[0-9a-f]+ +VERS_1.2 +(0x[0-9a-f]+ )?_?show_foo
+ [0-9a-f]+ +DF \*UND\*	[0-9a-f]+ +VERS_1.1 +(0x[0-9a-f]+ )?_?show_foo

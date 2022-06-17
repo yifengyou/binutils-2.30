@@ -1,0 +1,23 @@
+diff -rup binutils.orig/gold/layout.cc binutils-2.30/gold/layout.cc
+--- binutils.orig/gold/layout.cc	2018-07-27 12:02:14.160444849 +0100
++++ binutils-2.30/gold/layout.cc	2018-07-27 12:03:11.543820863 +0100
+@@ -5133,6 +5133,7 @@ const Layout::Section_name_mapping Layou
+   MAPPING_INIT(".gnu.linkonce.armextab.", ".ARM.extab"),
+   MAPPING_INIT(".ARM.exidx", ".ARM.exidx"),
+   MAPPING_INIT(".gnu.linkonce.armexidx.", ".ARM.exidx"),
++  MAPPING_INIT(".gnu.build.attributes.", ".gnu.build.attributes"),
+ };
+ #undef MAPPING_INIT
+ #undef MAPPING_INIT_EXACT
+diff -rup binutils.orig/ld/scripttempl/elf.sc binutils-2.30/ld/scripttempl/elf.sc
+--- binutils.orig/ld/scripttempl/elf.sc	2018-07-27 12:02:13.992446676 +0100
++++ binutils-2.30/ld/scripttempl/elf.sc	2018-07-27 12:02:42.292138945 +0100
+@@ -692,6 +692,8 @@ cat <<EOF
+ 
+   .comment       0 : { *(.comment) }
+ 
++  .gnu.build.attributes : { *(.gnu.build.attributes .gnu.build.attributes.*) }
++
+ EOF
+ 
+ . $srcdir/scripttempl/DWARF.sc

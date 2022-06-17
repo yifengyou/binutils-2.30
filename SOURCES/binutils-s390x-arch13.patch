@@ -1,0 +1,1040 @@
+# Add support for the arch13 extension to the s390x architecture.  (#1659437)
+
+diff -rup binutils.orig/gas/config/tc-s390.c binutils-2.30/gas/config/tc-s390.c
+--- binutils.orig/gas/config/tc-s390.c	2019-03-07 13:21:13.799468286 +0000
++++ binutils-2.30/gas/config/tc-s390.c	2019-03-07 14:02:36.903119967 +0000
+@@ -291,6 +291,8 @@ s390_parse_cpu (const char *         arg
+     { STRING_COMMA_LEN ("z13"), STRING_COMMA_LEN ("arch11"),
+       S390_INSTR_FLAG_HTM | S390_INSTR_FLAG_VX },
+     { STRING_COMMA_LEN ("z14"), STRING_COMMA_LEN ("arch12"),
++      S390_INSTR_FLAG_HTM | S390_INSTR_FLAG_VX },
++    { STRING_COMMA_LEN (""), STRING_COMMA_LEN ("arch13"),
+       S390_INSTR_FLAG_HTM | S390_INSTR_FLAG_VX }
+   };
+   static struct
+@@ -1229,6 +1231,24 @@ s390_elf_cons (int nbytes /* 1=.byte, 2=
+   demand_empty_rest_of_line ();
+ }
+ 
++/* Return true if all remaining operands in the opcode with
++   OPCODE_FLAGS can be skipped.  */
++static bfd_boolean
++skip_optargs_p (unsigned int opcode_flags, const unsigned char *opindex_ptr)
++{
++  if ((opcode_flags & (S390_INSTR_FLAG_OPTPARM | S390_INSTR_FLAG_OPTPARM2))
++      && opindex_ptr[0] != '\0'
++      && opindex_ptr[1] == '\0')
++    return TRUE;
++
++  if ((opcode_flags & S390_INSTR_FLAG_OPTPARM2)
++      && opindex_ptr[0] != '\0'
++      && opindex_ptr[1] != '\0'
++      && opindex_ptr[2] == '\0')
++    return TRUE;
++  return FALSE;
++}
++
+ /* We need to keep a list of fixups.  We can't simply generate them as
+    we go, because that would require us to first create the frag, and
+    that would screw up references to ``.''.  */
+@@ -1468,6 +1488,9 @@ md_gather_operands (char *str,
+ 	      while (!(operand->flags & S390_OPERAND_BASE))
+ 		operand = s390_operands + *(++opindex_ptr);
+ 
++	      if (*str == '\0' && skip_optargs_p (opcode->flags, &opindex_ptr[1]))
++		continue;
++
+ 	      /* If there is a next operand it must be separated by a comma.  */
+ 	      if (opindex_ptr[1] != '\0')
+ 		{
+@@ -1510,6 +1533,10 @@ md_gather_operands (char *str,
+ 	  if (*str++ != ')')
+ 	    as_bad (_("syntax error; missing ')' after base register"));
+ 	  skip_optional = 0;
++
++	  if (*str == '\0' && skip_optargs_p (opcode->flags, &opindex_ptr[1]))
++	    continue;
++
+ 	  /* If there is a next operand it must be separated by a comma.  */
+ 	  if (opindex_ptr[1] != '\0')
+ 	    {
+@@ -1539,18 +1566,7 @@ md_gather_operands (char *str,
+ 	      str++;
+ 	    }
+ 
+-	  if ((opcode->flags & (S390_INSTR_FLAG_OPTPARM
+-				| S390_INSTR_FLAG_OPTPARM2))
+-	      && opindex_ptr[1] != '\0'
+-	      && opindex_ptr[2] == '\0'
+-	      && *str == '\0')
+-	    continue;
+-
+-	  if ((opcode->flags & S390_INSTR_FLAG_OPTPARM2)
+-	      && opindex_ptr[1] != '\0'
+-	      && opindex_ptr[2] != '\0'
+-	      && opindex_ptr[3] == '\0'
+-	      && *str == '\0')
++	  if (*str == '\0' && skip_optargs_p (opcode->flags, &opindex_ptr[1]))
+ 	    continue;
+ 
+ 	  /* If there is a next operand it must be separated by a comma.  */
+diff -rup binutils.orig/gas/doc/c-s390.texi binutils-2.30/gas/doc/c-s390.texi
+--- binutils.orig/gas/doc/c-s390.texi	2019-03-07 13:21:13.806468232 +0000
++++ binutils-2.30/gas/doc/c-s390.texi	2019-03-07 13:23:07.799582976 +0000
+@@ -18,7 +18,7 @@ and eleven chip levels. The architecture
+ Architecture (ESA) and the newer z/Architecture mode. The chip levels
+ are g5 (or arch3), g6, z900 (or arch5), z990 (or arch6), z9-109, z9-ec
+ (or arch7), z10 (or arch8), z196 (or arch9), zEC12 (or arch10), z13
+-(or arch11), and z14 (or arch12).
++(or arch11), z14 (or arch12), and arch13.
+ 
+ @menu
+ * s390 Options::                Command-line Options.
+@@ -68,8 +68,10 @@ are recognized:
+ @code{z9-ec} (or @code{arch7}),
+ @code{z10} (or @code{arch8}),
+ @code{z196} (or @code{arch9}),
+-@code{zEC12} (or @code{arch10}) and
+-@code{z13} (or @code{arch11}).
++@code{zEC12} (or @code{arch10}),
++@code{z13} (or @code{arch11}),
++@code{z14} (or @code{arch12}), and
++@code{arch13}).
+ 
+ Assembling an instruction that is not supported on the target
+ processor results in an error message.
+diff -rup binutils.orig/gas/testsuite/gas/s390/s390.exp binutils-2.30/gas/testsuite/gas/s390/s390.exp
+--- binutils.orig/gas/testsuite/gas/s390/s390.exp	2019-03-07 13:21:13.813468178 +0000
++++ binutils-2.30/gas/testsuite/gas/s390/s390.exp	2019-03-07 13:24:31.563932472 +0000
+@@ -29,9 +29,11 @@ if [expr [istarget "s390-*-*"] ||  [ista
+     run_dump_test "zarch-zEC12" "{as -m64} {as -march=zEC12}"
+     run_dump_test "zarch-z13" "{as -m64} {as -march=z13}"
+     run_dump_test "zarch-arch12" "{as -m64} {as -march=arch12}"
++    run_dump_test "zarch-arch13" "{as -m64} {as -march=arch13}"
+     run_dump_test "zarch-reloc" "{as -m64}"
+     run_dump_test "zarch-operands" "{as -m64} {as -march=z9-109}"
+     run_dump_test "zarch-machine" "{as -m64} {as -march=z900}"
++    run_dump_test "zarch-optargs" "{as -m64} {as -march=arch12}"
+     run_list_test "machine-parsing-1" ""
+     run_list_test "machine-parsing-2" ""
+     run_list_test "machine-parsing-3" ""
+diff -rup binutils.orig/gas/testsuite/gas/s390/zarch-arch12.d binutils-2.30/gas/testsuite/gas/s390/zarch-arch12.d
+--- binutils.orig/gas/testsuite/gas/s390/zarch-arch12.d	2019-03-07 13:21:13.815468162 +0000
++++ binutils-2.30/gas/testsuite/gas/s390/zarch-arch12.d	2019-03-07 13:25:32.126462146 +0000
+@@ -201,3 +201,11 @@ Disassembly of section .text:
+ .*:	b9 3c 00 69 [	 ]*prno	%r6,%r9
+ .*:	b9 a1 00 69 [	 ]*tpei	%r6,%r9
+ .*:	b9 ac 00 69 [	 ]*irbm	%r6,%r9
++.*:	e7 f6 9f a0 00 06 [	 ]*vl	%v15,4000\(%r6,%r9\)
++.*:	e7 f6 9f a0 d0 06 [	 ]*vl	%v15,4000\(%r6,%r9\),13
++.*:	e7 f1 6f a0 04 36 [	 ]*vlm	%v15,%v17,4000\(%r6\)
++.*:	e7 f1 6f a0 d4 36 [	 ]*vlm	%v15,%v17,4000\(%r6\),13
++.*:	e7 f6 9f a0 00 0e [	 ]*vst	%v15,4000\(%r6,%r9\)
++.*:	e7 f6 9f a0 d0 0e [	 ]*vst	%v15,4000\(%r6,%r9\),13
++.*:	e7 f1 6f a0 04 3e [	 ]*vstm	%v15,%v17,4000\(%r6\)
++.*:	e7 f1 6f a0 d4 3e [	 ]*vstm	%v15,%v17,4000\(%r6\),13
+diff -rup binutils.orig/gas/testsuite/gas/s390/zarch-arch12.s binutils-2.30/gas/testsuite/gas/s390/zarch-arch12.s
+--- binutils.orig/gas/testsuite/gas/s390/zarch-arch12.s	2019-03-07 13:21:13.814468170 +0000
++++ binutils-2.30/gas/testsuite/gas/s390/zarch-arch12.s	2019-03-07 13:25:32.126462146 +0000
+@@ -195,3 +195,11 @@ foo:
+ 	prno	%r6,%r9
+ 	tpei	%r6,%r9
+ 	irbm	%r6,%r9
++	vl	%v15,4000(%r6,%r9)
++	vl	%v15,4000(%r6,%r9),13
++	vlm	%v15,%v17,4000(%r6)
++	vlm	%v15,%v17,4000(%r6),13
++	vst	%v15,4000(%r6,%r9)
++	vst	%v15,4000(%r6,%r9),13
++	vstm	%v15,%v17,4000(%r6)
++	vstm	%v15,%v17,4000(%r6),13
+diff -rup binutils.orig/gas/testsuite/gas/s390/zarch-z13.d binutils-2.30/gas/testsuite/gas/s390/zarch-z13.d
+--- binutils.orig/gas/testsuite/gas/s390/zarch-z13.d	2019-03-07 13:21:13.814468170 +0000
++++ binutils-2.30/gas/testsuite/gas/s390/zarch-z13.d	2019-03-07 13:23:07.799582976 +0000
+@@ -495,16 +495,16 @@ Disassembly of section .text:
+ .*:	e7 f1 40 10 36 ea [ 	]*vfchedbs	%v15,%v17,%v20
+ .*:	e7 f1 40 08 36 ea [ 	]*wfchedb	%v15,%v17,%v20
+ .*:	e7 f1 40 18 36 ea [ 	]*wfchedbs	%v15,%v17,%v20
+-.*:	e7 f1 00 bc d4 c3 [ 	]*vcdg	%v15,%v17,13,12,11
++.*:	e7 f1 00 bc d4 c3 [ 	]*vcfps	%v15,%v17,13,12,11
+ .*:	e7 f1 00 cd 34 c3 [ 	]*wcdgb	%v15,%v17,5,12
+ .*:	e7 f1 00 cd 34 c3 [ 	]*wcdgb	%v15,%v17,5,12
+-.*:	e7 f1 00 bc d4 c1 [ 	]*vcdlg	%v15,%v17,13,12,11
++.*:	e7 f1 00 bc d4 c1 [ 	]*vcfpl	%v15,%v17,13,12,11
+ .*:	e7 f1 00 cd 34 c1 [ 	]*wcdlgb	%v15,%v17,5,12
+ .*:	e7 f1 00 cd 34 c1 [ 	]*wcdlgb	%v15,%v17,5,12
+-.*:	e7 f1 00 bc d4 c2 [ 	]*vcgd	%v15,%v17,13,12,11
++.*:	e7 f1 00 bc d4 c2 [ 	]*vcsfp	%v15,%v17,13,12,11
+ .*:	e7 f1 00 cd 34 c2 [ 	]*wcgdb	%v15,%v17,5,12
+ .*:	e7 f1 00 cd 34 c2 [ 	]*wcgdb	%v15,%v17,5,12
+-.*:	e7 f1 00 bc d4 c0 [ 	]*vclgd	%v15,%v17,13,12,11
++.*:	e7 f1 00 bc d4 c0 [ 	]*vclfp	%v15,%v17,13,12,11
+ .*:	e7 f1 00 cd 34 c0 [ 	]*wclgdb	%v15,%v17,5,12
+ .*:	e7 f1 00 cd 34 c0 [ 	]*wclgdb	%v15,%v17,5,12
+ .*:	e7 f1 40 0c d6 e5 [ 	]*vfd	%v15,%v17,%v20,13,12
+diff -rup binutils.orig/include/opcode/s390.h binutils-2.30/include/opcode/s390.h
+--- binutils.orig/include/opcode/s390.h	2019-03-07 13:21:14.295464435 +0000
++++ binutils-2.30/include/opcode/s390.h	2019-03-07 13:23:07.799582976 +0000
+@@ -43,6 +43,7 @@ enum s390_opcode_cpu_val
+     S390_OPCODE_ZEC12,
+     S390_OPCODE_Z13,
+     S390_OPCODE_ARCH12,
++    S390_OPCODE_ARCH13,
+     S390_OPCODE_MAXCPU
+   };
+ 
+diff -rup binutils.orig/opcodes/s390-mkopc.c binutils-2.30/opcodes/s390-mkopc.c
+--- binutils.orig/opcodes/s390-mkopc.c	2019-03-07 13:21:13.440471074 +0000
++++ binutils-2.30/opcodes/s390-mkopc.c	2019-03-07 13:23:07.818582828 +0000
+@@ -377,6 +377,8 @@ main (void)
+       else if (strcmp (cpu_string, "z14") == 0
+ 	       || strcmp (cpu_string, "arch12") == 0)
+ 	min_cpu = S390_OPCODE_ARCH12;
++      else if (strcmp (cpu_string, "arch13") == 0)
++	min_cpu = S390_OPCODE_ARCH13;
+       else {
+ 	fprintf (stderr, "Couldn't parse cpu string %s\n", cpu_string);
+ 	exit (1);
+diff -rup binutils.orig/opcodes/s390-opc.c binutils-2.30/opcodes/s390-opc.c
+--- binutils.orig/opcodes/s390-opc.c	2019-03-07 13:21:13.439471082 +0000
++++ binutils-2.30/opcodes/s390-opc.c	2019-03-07 13:23:07.819582821 +0000
+@@ -359,6 +359,7 @@ const struct s390_operand s390_operands[
+ #define INSTR_RRF_RURR2    4, { R_24,R_16,R_28,U4_20,0,0 }       /* e.g. lptea */
+ #define INSTR_RRF_R0RR     4, { R_24,R_16,R_28,0,0,0 }           /* e.g. idte  */
+ #define INSTR_RRF_R0RR2    4, { R_24,R_28,R_16,0,0,0 }           /* e.g. ark   */
++#define INSTR_RRF_R0RR3    4, { R_24,R_28,R_16,0,0,0 }           /* e.g. selrz */
+ #define INSTR_RRF_U0FF     4, { F_24,U4_16,F_28,0,0,0 }          /* e.g. fidbr */
+ #define INSTR_RRF_U0FEFE   4, { FE_24,U4_16,FE_28,0,0,0 }        /* e.g. fixbr */
+ #define INSTR_RRF_U0RF     4, { R_24,U4_16,F_28,0,0,0 }          /* e.g. cfebr */
+@@ -513,6 +514,7 @@ const struct s390_operand s390_operands[
+ #define INSTR_VRR_VV0U0U   6, { V_8,V_12,U4_32,U4_24,0,0 }       /* e.g. vistr */
+ #define INSTR_VRR_0VV0U    6, { V_12,V_16,U4_24,0,0,0 }          /* e.g. vcp   */
+ #define INSTR_VRR_RV0U     6, { R_8,V_12,U4_24,0,0,0 }           /* e.g. vcvb  */
++#define INSTR_VRR_RV0UU    6, { R_8,V_12,U4_24,U4_28,0,0 }       /* e.g. vcvb  */
+ #define INSTR_VSI_URDV     6, { V_32,D_20,B_16,U8_8,0,0 }        /* e.g. vlrl  */
+ 
+ #define MASK_E            { 0xff, 0xff, 0x00, 0x00, 0x00, 0x00 }
+@@ -578,6 +580,7 @@ const struct s390_operand s390_operands[
+ #define MASK_RRF_RURR2    { 0xff, 0xff, 0x00, 0x00, 0x00, 0x00 }
+ #define MASK_RRF_R0RR     { 0xff, 0xff, 0x00, 0x00, 0x00, 0x00 }
+ #define MASK_RRF_R0RR2    { 0xff, 0xff, 0x00, 0x00, 0x00, 0x00 }
++#define MASK_RRF_R0RR3    { 0xff, 0xff, 0x0f, 0x00, 0x00, 0x00 }
+ #define MASK_RRF_U0FF     { 0xff, 0xff, 0x0f, 0x00, 0x00, 0x00 }
+ #define MASK_RRF_U0FEFE   { 0xff, 0xff, 0x0f, 0x00, 0x00, 0x00 }
+ #define MASK_RRF_U0RF     { 0xff, 0xff, 0x0f, 0x00, 0x00, 0x00 }
+@@ -732,6 +735,7 @@ const struct s390_operand s390_operands[
+ #define MASK_VRR_VV0U0U   { 0xff, 0x00, 0xff, 0x0f, 0x00, 0xff }
+ #define MASK_VRR_0VV0U    { 0xff, 0xf0, 0x0f, 0x0f, 0xf0, 0xff }
+ #define MASK_VRR_RV0U     { 0xff, 0x00, 0xff, 0x0f, 0xf0, 0xff }
++#define MASK_VRR_RV0UU    { 0xff, 0x00, 0xff, 0x00, 0xf0, 0xff }
+ #define MASK_VSI_URDV     { 0xff, 0x00, 0x00, 0x00, 0x00, 0xff }
+ 
+ 
+diff -rup binutils.orig/opcodes/s390-opc.txt binutils-2.30/opcodes/s390-opc.txt
+--- binutils.orig/opcodes/s390-opc.txt	2019-03-07 13:21:13.425471191 +0000
++++ binutils-2.30/opcodes/s390-opc.txt	2019-03-07 13:26:01.603233234 +0000
+@@ -1880,3 +1880,115 @@ b929 kma RRF_R0RR "cipher message with g
+ b93c prno RRE_RR "perform pseudorandom number operation" arch12 zarch
+ b9a1 tpei RRE_RR "test pending external interruption" arch12 zarch
+ b9ac irbm RRE_RR "insert reference bits multiple" arch12 zarch
++
++
++# Aligned vector store hints
++
++e70000000006 vl VRX_VRRDU "vector memory load" arch12 zarch optparm
++e70000000036 vlm VRS_VVRDU "vector load multiple" arch12 zarch optparm
++e7000000000e vst VRX_VRRDU "vector store" arch12 zarch optparm
++e7000000003e vstm VRS_VVRDU "vector store multiple" arch12 zarch optparm
++
++# arch13 instructions
++
++b9f5 ncrk RRF_R0RR2 " " arch13 zarch
++b9e5 ncgrk RRF_R0RR2 " " arch13 zarch
++e50a mvcrl SSE_RDRD " " arch13 zarch
++b974 nnrk RRF_R0RR2 " " arch13 zarch
++b964 nngrk RRF_R0RR2 " " arch13 zarch
++b976 nork RRF_R0RR2 " " arch13 zarch
++b966 nogrk RRF_R0RR2 " " arch13 zarch
++b977 nxrk RRF_R0RR2 " " arch13 zarch
++b967 nxgrk RRF_R0RR2 " " arch13 zarch
++b975 ocrk RRF_R0RR2 " " arch13 zarch
++b965 ocgrk RRF_R0RR2 " " arch13 zarch
++b9e1 popcnt RRF_U0RR " " arch13 zarch optparm
++b9f0 selr RRF_RURR " " arch13 zarch
++b9f00000 selr*20 RRF_R0RR3 " " arch13 zarch
++b9e3 selgr RRF_RURR " " arch13 zarch
++b9e30000 selgr*20 RRF_R0RR3 " " arch13 zarch
++b9c0 selhhhr RRF_RURR " " arch13 zarch
++b9c00000 selhhhr*20 RRF_R0RR3 " " arch13 zarch
++
++e60000000006 vlbr VRX_VRRDU " " arch13 zarch
++e60000001006 vlbrh VRX_VRRD " " arch13 zarch
++e60000002006 vlbrf VRX_VRRD " " arch13 zarch
++e60000003006 vlbrg VRX_VRRD " " arch13 zarch
++e60000004006 vlbrq VRX_VRRD " " arch13 zarch
++
++e60000000007 vler VRX_VRRDU " " arch13 zarch
++e60000001007 vlerh VRX_VRRD " " arch13 zarch
++e60000002007 vlerf VRX_VRRD " " arch13 zarch
++e60000003007 vlerg VRX_VRRD " " arch13 zarch
++
++e60000000004 vllebrz VRX_VRRDU " " arch13 zarch
++e60000001004 vllebrzh VRX_VRRD " " arch13 zarch
++e60000002004 vllebrzf VRX_VRRD " " arch13 zarch
++e60000003004 ldrv VRX_VRRD " " arch13 zarch
++e60000003004 vllebrzg VRX_VRRD " " arch13 zarch
++e60000006004 lerv VRX_VRRD " " arch13 zarch
++e60000006004 vllebrze VRX_VRRD " " arch13 zarch
++
++e60000000001 vlebrh VRX_VRRDU " " arch13 zarch
++e60000000003 vlebrf VRX_VRRDU " " arch13 zarch
++e60000000002 vlebrg VRX_VRRDU " " arch13 zarch
++
++e60000000005 vlbrrep VRX_VRRDU " " arch13 zarch
++e60000001005 vlbrreph VRX_VRRD " " arch13 zarch
++e60000002005 vlbrrepf VRX_VRRD " " arch13 zarch
++e60000003005 vlbrrepg VRX_VRRD " " arch13 zarch
++
++e6000000000e vstbr VRX_VRRDU " " arch13 zarch
++e6000000100e vstbrh VRX_VRRD " " arch13 zarch
++e6000000200e vstbrf VRX_VRRD " " arch13 zarch
++e6000000300e vstbrg VRX_VRRD " " arch13 zarch
++e6000000400e vstbrq VRX_VRRD " " arch13 zarch
++
++e6000000000f vster VRX_VRRDU " " arch13 zarch
++e6000000100f vsterh VRX_VRRD " " arch13 zarch
++e6000000200f vsterf VRX_VRRD " " arch13 zarch
++e6000000300f vsterg VRX_VRRD " " arch13 zarch
++
++e60000000009 vstebrh VRX_VRRDU " " arch13 zarch
++e6000000000b vstebrf VRX_VRRDU " " arch13 zarch
++e6000000000b sterv VRX_VRRD " " arch13 zarch
++e6000000000a vstebrg VRX_VRRDU " " arch13 zarch
++e6000000000a stdrv VRX_VRRD " " arch13 zarch
++
++e70000000086 vsld VRI_VVV0U " " arch13 zarch
++e70000000087 vsrd VRI_VVV0U " " arch13 zarch
++
++e7000000008b vstrs VRR_VVVUU0V " " arch13 zarch optparm
++
++e7000000008b vstrsb VRR_VVVU0VB " " arch13 zarch optparm
++e7000100008b vstrsh VRR_VVVU0VB " " arch13 zarch optparm
++e7000200008b vstrsf VRR_VVVU0VB " " arch13 zarch optparm
++
++e7000020008b vstrszb VRR_VVVU0VB2 " " arch13 zarch optparm
++e7000120008b vstrszh VRR_VVVU0VB2 " " arch13 zarch optparm
++e7000220008b vstrszf VRR_VVVU0VB2 " " arch13 zarch optparm
++
++e700000000c3 vcfps VRR_VV0UUU " " arch13 zarch
++e700000020c3 vcefb VRR_VV0UU " " arch13 zarch
++e700000820c3 wcefb VRR_VV0UU8 " " arch13 zarch
++
++e700000000c1 vcfpl VRR_VV0UUU " " arch13 zarch
++e700000020c1 vcelfb VRR_VV0UU " " arch13 zarch
++e700000820c1 wcelfb VRR_VV0UU8 " " arch13 zarch
++
++e700000000c2 vcsfp VRR_VV0UUU " " arch13 zarch
++e700000020c2 vcfeb VRR_VV0UU " " arch13 zarch
++e700000820c2 wcfeb VRR_VV0UU8 " " arch13 zarch
++
++e700000000c0 vclfp VRR_VV0UUU " " arch13 zarch
++e700000020c0 vclfeb VRR_VV0UU " " arch13 zarch
++e700000820c0 wclfeb VRR_VV0UU8 " " arch13 zarch
++
++b939 dfltcc RRF_R0RR2 " " arch13 zarch
++
++b938 sortl RRE_RR " " arch13 zarch
++
++e60000000050 vcvb VRR_RV0UU " " arch13 zarch optparm
++e60000000052 vcvbg VRR_RV0UU " " arch13 zarch optparm
++
++b93a kdsa RRE_RR " " arch13 zarch
+--- /dev/null	2019-03-07 09:27:55.425999321 +0000
++++ binutils-2.30/gas/testsuite/gas/s390/zarch-arch13.s	2019-03-07 13:23:07.799582976 +0000
+@@ -0,0 +1,150 @@
++.text
++foo:
++	ncrk	%r6,%r9,%r11
++	ncgrk	%r6,%r9,%r11
++	mvcrl	4000(%r6),4000(%r9)
++	nnrk	%r6,%r9,%r11
++	nngrk	%r6,%r9,%r11
++	nork	%r6,%r9,%r11
++	nogrk	%r6,%r9,%r11
++	nxrk	%r6,%r9,%r11
++	nxgrk	%r6,%r9,%r11
++	ocrk	%r6,%r9,%r11
++	ocgrk	%r6,%r9,%r11
++	popcnt	%r6,%r9
++	popcnt	%r6,%r9,13
++	selr	%r6,%r9,%r11,13
++	selro	%r6,%r9,%r11
++	selrh	%r6,%r9,%r11
++	selrp	%r6,%r9,%r11
++	selrnle	%r6,%r9,%r11
++	selrl	%r6,%r9,%r11
++	selrm	%r6,%r9,%r11
++	selrnhe	%r6,%r9,%r11
++	selrlh	%r6,%r9,%r11
++	selrne	%r6,%r9,%r11
++	selrnz	%r6,%r9,%r11
++	selre	%r6,%r9,%r11
++	selrz	%r6,%r9,%r11
++	selrnlh	%r6,%r9,%r11
++	selrhe	%r6,%r9,%r11
++	selrnl	%r6,%r9,%r11
++	selrnm	%r6,%r9,%r11
++	selrle	%r6,%r9,%r11
++	selrnh	%r6,%r9,%r11
++	selrnp	%r6,%r9,%r11
++	selrno	%r6,%r9,%r11
++	selgr	%r6,%r9,%r11,13
++	selgro	%r6,%r9,%r11
++	selgrh	%r6,%r9,%r11
++	selgrp	%r6,%r9,%r11
++	selgrnle	%r6,%r9,%r11
++	selgrl	%r6,%r9,%r11
++	selgrm	%r6,%r9,%r11
++	selgrnhe	%r6,%r9,%r11
++	selgrlh	%r6,%r9,%r11
++	selgrne	%r6,%r9,%r11
++	selgrnz	%r6,%r9,%r11
++	selgre	%r6,%r9,%r11
++	selgrz	%r6,%r9,%r11
++	selgrnlh	%r6,%r9,%r11
++	selgrhe	%r6,%r9,%r11
++	selgrnl	%r6,%r9,%r11
++	selgrnm	%r6,%r9,%r11
++	selgrle	%r6,%r9,%r11
++	selgrnh	%r6,%r9,%r11
++	selgrnp	%r6,%r9,%r11
++	selgrno	%r6,%r9,%r11
++	selhhhr	%r6,%r9,%r11,13
++	selhhhro	%r6,%r9,%r11
++	selhhhrh	%r6,%r9,%r11
++	selhhhrp	%r6,%r9,%r11
++	selhhhrnle	%r6,%r9,%r11
++	selhhhrl	%r6,%r9,%r11
++	selhhhrm	%r6,%r9,%r11
++	selhhhrnhe	%r6,%r9,%r11
++	selhhhrlh	%r6,%r9,%r11
++	selhhhrne	%r6,%r9,%r11
++	selhhhrnz	%r6,%r9,%r11
++	selhhhre	%r6,%r9,%r11
++	selhhhrz	%r6,%r9,%r11
++	selhhhrnlh	%r6,%r9,%r11
++	selhhhrhe	%r6,%r9,%r11
++	selhhhrnl	%r6,%r9,%r11
++	selhhhrnm	%r6,%r9,%r11
++	selhhhrle	%r6,%r9,%r11
++	selhhhrnh	%r6,%r9,%r11
++	selhhhrnp	%r6,%r9,%r11
++	selhhhrno	%r6,%r9,%r11
++	vlbr	%v15,4000(%r6,%r9),13
++	vlbrh	%v15,4000(%r6,%r9)
++	vlbrf	%v15,4000(%r6,%r9)
++	vlbrg	%v15,4000(%r6,%r9)
++	vlbrq	%v15,4000(%r6,%r9)
++	vler	%v15,4000(%r6,%r9),13
++	vlerh	%v15,4000(%r6,%r9)
++	vlerf	%v15,4000(%r6,%r9)
++	vlerg	%v15,4000(%r6,%r9)
++	vllebrz	%v15,4000(%r6,%r9),13
++	vllebrzh	%v15,4000(%r6,%r9)
++	vllebrzf	%v15,4000(%r6,%r9)
++	ldrv	%v15,4000(%r6,%r9)
++	vllebrzg	%v15,4000(%r6,%r9)
++	lerv	%v15,4000(%r6,%r9)
++	vllebrze	%v15,4000(%r6,%r9)
++	vlebrh	%v15,4000(%r6,%r9),13
++	vlebrf	%v15,4000(%r6,%r9),13
++	vlebrg	%v15,4000(%r6,%r9),13
++	vlbrrep	%v15,4000(%r6,%r9),13
++	vlbrreph	%v15,4000(%r6,%r9)
++	vlbrrepf	%v15,4000(%r6,%r9)
++	vlbrrepg	%v15,4000(%r6,%r9)
++	vstbr	%v15,4000(%r6,%r9),13
++	vstbrh	%v15,4000(%r6,%r9)
++	vstbrf	%v15,4000(%r6,%r9)
++	vstbrg	%v15,4000(%r6,%r9)
++	vstbrq	%v15,4000(%r6,%r9)
++	vster	%v15,4000(%r6,%r9),13
++	vsterh	%v15,4000(%r6,%r9)
++	vsterf	%v15,4000(%r6,%r9)
++	vsterg	%v15,4000(%r6,%r9)
++	vstebrh	%v15,4000(%r6,%r9),13
++	vstebrf	%v15,4000(%r6,%r9),13
++	sterv	%v15,4000(%r6,%r9)
++	vstebrg	%v15,4000(%r6,%r9),13
++	stdrv	%v15,4000(%r6,%r9)
++	vsld	%v15,%v17,%v20,253
++	vsrd	%v15,%v17,%v20,253
++	vstrs	%v15,%v17,%v20,%v24,13
++	vstrs	%v15,%v17,%v20,%v24,13,12
++	vstrsb	%v15,%v17,%v20,%v24
++	vstrsb	%v15,%v17,%v20,%v24,13
++	vstrsh	%v15,%v17,%v20,%v24
++	vstrsh	%v15,%v17,%v20,%v24,13
++	vstrsf	%v15,%v17,%v20,%v24
++	vstrsf	%v15,%v17,%v20,%v24,13
++	vstrszb	%v15,%v17,%v20,%v24
++	vstrszb	%v15,%v17,%v20,%v24,13
++	vstrszh	%v15,%v17,%v20,%v24
++	vstrszh	%v15,%v17,%v20,%v24,13
++	vstrszf	%v15,%v17,%v20,%v24
++	vstrszf	%v15,%v17,%v20,%v24,13
++	vcfps	%v15,%v17,13,12,11
++	vcefb	%v15,%v17,13,12
++	wcefb	%v15,%v17,13,12
++	vcfpl	%v15,%v17,13,12,11
++	vcelfb	%v15,%v17,13,12
++	wcelfb	%v15,%v17,13,12
++	vcsfp	%v15,%v17,13,12,11
++	vcfeb	%v15,%v17,13,12
++	wcfeb	%v15,%v17,13,12
++	vclfp	%v15,%v17,13,12,11
++	vclfeb	%v15,%v17,13,12
++	wclfeb	%v15,%v17,13,12
++	dfltcc	%r6,%r9,%r11
++	sortl	%r6,%r9
++	vcvb	%r6,%v15,13
++	vcvb	%r6,%v15,13,12
++	vcvbg	%r6,%v15,13
++	vcvbg	%r6,%v15,13,12
++	kdsa	%r6,%r9
+--- /dev/null	2019-03-07 09:27:55.425999321 +0000
++++ binutils-2.30/gas/testsuite/gas/s390/zarch-arch13.d	2019-03-07 13:23:07.799582976 +0000
+@@ -0,0 +1,156 @@
++#name: s390x opcode
++#objdump: -dr
++
++.*: +file format .*
++
++Disassembly of section .text:
++
++.* <foo>:
++.*:	b9 f5 b0 69 [	 ]*ncrk	%r6,%r9,%r11
++.*:	b9 e5 b0 69 [	 ]*ncgrk	%r6,%r9,%r11
++.*:	e5 0a 6f a0 9f a0 [	 ]*mvcrl	4000\(%r6\),4000\(%r9\)
++.*:	b9 74 b0 69 [	 ]*nnrk	%r6,%r9,%r11
++.*:	b9 64 b0 69 [	 ]*nngrk	%r6,%r9,%r11
++.*:	b9 76 b0 69 [	 ]*nork	%r6,%r9,%r11
++.*:	b9 66 b0 69 [	 ]*nogrk	%r6,%r9,%r11
++.*:	b9 77 b0 69 [	 ]*nxrk	%r6,%r9,%r11
++.*:	b9 67 b0 69 [	 ]*nxgrk	%r6,%r9,%r11
++.*:	b9 75 b0 69 [	 ]*ocrk	%r6,%r9,%r11
++.*:	b9 65 b0 69 [	 ]*ocgrk	%r6,%r9,%r11
++.*:	b9 e1 00 69 [	 ]*popcnt	%r6,%r9
++.*:	b9 e1 d0 69 [	 ]*popcnt	%r6,%r9,13
++.*:	b9 f0 bd 69 [	 ]*selrnh	%r6,%r9,%r11
++.*:	b9 f0 b1 69 [	 ]*selro	%r6,%r9,%r11
++.*:	b9 f0 b2 69 [	 ]*selrh	%r6,%r9,%r11
++.*:	b9 f0 b2 69 [	 ]*selrh	%r6,%r9,%r11
++.*:	b9 f0 b3 69 [	 ]*selrnle	%r6,%r9,%r11
++.*:	b9 f0 b4 69 [	 ]*selrl	%r6,%r9,%r11
++.*:	b9 f0 b4 69 [	 ]*selrl	%r6,%r9,%r11
++.*:	b9 f0 b5 69 [	 ]*selrnhe	%r6,%r9,%r11
++.*:	b9 f0 b6 69 [	 ]*selrlh	%r6,%r9,%r11
++.*:	b9 f0 b7 69 [	 ]*selrne	%r6,%r9,%r11
++.*:	b9 f0 b7 69 [	 ]*selrne	%r6,%r9,%r11
++.*:	b9 f0 b8 69 [	 ]*selre	%r6,%r9,%r11
++.*:	b9 f0 b8 69 [	 ]*selre	%r6,%r9,%r11
++.*:	b9 f0 b9 69 [	 ]*selrnlh	%r6,%r9,%r11
++.*:	b9 f0 ba 69 [	 ]*selrhe	%r6,%r9,%r11
++.*:	b9 f0 bb 69 [	 ]*selrnl	%r6,%r9,%r11
++.*:	b9 f0 bb 69 [	 ]*selrnl	%r6,%r9,%r11
++.*:	b9 f0 bc 69 [	 ]*selrle	%r6,%r9,%r11
++.*:	b9 f0 bd 69 [	 ]*selrnh	%r6,%r9,%r11
++.*:	b9 f0 bd 69 [	 ]*selrnh	%r6,%r9,%r11
++.*:	b9 f0 be 69 [	 ]*selrno	%r6,%r9,%r11
++.*:	b9 e3 bd 69 [	 ]*selgrnh	%r6,%r9,%r11
++.*:	b9 e3 b1 69 [	 ]*selgro	%r6,%r9,%r11
++.*:	b9 e3 b2 69 [	 ]*selgrh	%r6,%r9,%r11
++.*:	b9 e3 b2 69 [	 ]*selgrh	%r6,%r9,%r11
++.*:	b9 e3 b3 69 [	 ]*selgrnle	%r6,%r9,%r11
++.*:	b9 e3 b4 69 [	 ]*selgrl	%r6,%r9,%r11
++.*:	b9 e3 b4 69 [	 ]*selgrl	%r6,%r9,%r11
++.*:	b9 e3 b5 69 [	 ]*selgrnhe	%r6,%r9,%r11
++.*:	b9 e3 b6 69 [	 ]*selgrlh	%r6,%r9,%r11
++.*:	b9 e3 b7 69 [	 ]*selgrne	%r6,%r9,%r11
++.*:	b9 e3 b7 69 [	 ]*selgrne	%r6,%r9,%r11
++.*:	b9 e3 b8 69 [	 ]*selgre	%r6,%r9,%r11
++.*:	b9 e3 b8 69 [	 ]*selgre	%r6,%r9,%r11
++.*:	b9 e3 b9 69 [	 ]*selgrnlh	%r6,%r9,%r11
++.*:	b9 e3 ba 69 [	 ]*selgrhe	%r6,%r9,%r11
++.*:	b9 e3 bb 69 [	 ]*selgrnl	%r6,%r9,%r11
++.*:	b9 e3 bb 69 [	 ]*selgrnl	%r6,%r9,%r11
++.*:	b9 e3 bc 69 [	 ]*selgrle	%r6,%r9,%r11
++.*:	b9 e3 bd 69 [	 ]*selgrnh	%r6,%r9,%r11
++.*:	b9 e3 bd 69 [	 ]*selgrnh	%r6,%r9,%r11
++.*:	b9 e3 be 69 [	 ]*selgrno	%r6,%r9,%r11
++.*:	b9 c0 bd 69 [	 ]*selhhhrnh	%r6,%r9,%r11
++.*:	b9 c0 b1 69 [	 ]*selhhhro	%r6,%r9,%r11
++.*:	b9 c0 b2 69 [	 ]*selhhhrh	%r6,%r9,%r11
++.*:	b9 c0 b2 69 [	 ]*selhhhrh	%r6,%r9,%r11
++.*:	b9 c0 b3 69 [	 ]*selhhhrnle	%r6,%r9,%r11
++.*:	b9 c0 b4 69 [	 ]*selhhhrl	%r6,%r9,%r11
++.*:	b9 c0 b4 69 [	 ]*selhhhrl	%r6,%r9,%r11
++.*:	b9 c0 b5 69 [	 ]*selhhhrnhe	%r6,%r9,%r11
++.*:	b9 c0 b6 69 [	 ]*selhhhrlh	%r6,%r9,%r11
++.*:	b9 c0 b7 69 [	 ]*selhhhrne	%r6,%r9,%r11
++.*:	b9 c0 b7 69 [	 ]*selhhhrne	%r6,%r9,%r11
++.*:	b9 c0 b8 69 [	 ]*selhhhre	%r6,%r9,%r11
++.*:	b9 c0 b8 69 [	 ]*selhhhre	%r6,%r9,%r11
++.*:	b9 c0 b9 69 [	 ]*selhhhrnlh	%r6,%r9,%r11
++.*:	b9 c0 ba 69 [	 ]*selhhhrhe	%r6,%r9,%r11
++.*:	b9 c0 bb 69 [	 ]*selhhhrnl	%r6,%r9,%r11
++.*:	b9 c0 bb 69 [	 ]*selhhhrnl	%r6,%r9,%r11
++.*:	b9 c0 bc 69 [	 ]*selhhhrle	%r6,%r9,%r11
++.*:	b9 c0 bd 69 [	 ]*selhhhrnh	%r6,%r9,%r11
++.*:	b9 c0 bd 69 [	 ]*selhhhrnh	%r6,%r9,%r11
++.*:	b9 c0 be 69 [	 ]*selhhhrno	%r6,%r9,%r11
++.*:	e6 f6 9f a0 d0 06 [	 ]*vlbr	%v15,4000\(%r6,%r9\),13
++.*:	e6 f6 9f a0 10 06 [	 ]*vlbrh	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 20 06 [	 ]*vlbrf	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 30 06 [	 ]*vlbrg	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 40 06 [	 ]*vlbrq	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 d0 07 [	 ]*vler	%v15,4000\(%r6,%r9\),13
++.*:	e6 f6 9f a0 10 07 [	 ]*vlerh	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 20 07 [	 ]*vlerf	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 30 07 [	 ]*vlerg	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 d0 04 [	 ]*vllebrz	%v15,4000\(%r6,%r9\),13
++.*:	e6 f6 9f a0 10 04 [	 ]*vllebrzh	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 20 04 [	 ]*vllebrzf	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 30 04 [	 ]*ldrv	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 30 04 [	 ]*ldrv	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 60 04 [	 ]*lerv	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 60 04 [	 ]*lerv	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 d0 01 [	 ]*vlebrh	%v15,4000\(%r6,%r9\),13
++.*:	e6 f6 9f a0 d0 03 [	 ]*vlebrf	%v15,4000\(%r6,%r9\),13
++.*:	e6 f6 9f a0 d0 02 [	 ]*vlebrg	%v15,4000\(%r6,%r9\),13
++.*:	e6 f6 9f a0 d0 05 [	 ]*vlbrrep	%v15,4000\(%r6,%r9\),13
++.*:	e6 f6 9f a0 10 05 [	 ]*vlbrreph	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 20 05 [	 ]*vlbrrepf	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 30 05 [	 ]*vlbrrepg	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 d0 0e [	 ]*vstbr	%v15,4000\(%r6,%r9\),13
++.*:	e6 f6 9f a0 10 0e [	 ]*vstbrh	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 20 0e [	 ]*vstbrf	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 30 0e [	 ]*vstbrg	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 40 0e [	 ]*vstbrq	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 d0 0f [	 ]*vster	%v15,4000\(%r6,%r9\),13
++.*:	e6 f6 9f a0 10 0f [	 ]*vsterh	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 20 0f [	 ]*vsterf	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 30 0f [	 ]*vsterg	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 d0 09 [	 ]*vstebrh	%v15,4000\(%r6,%r9\),13
++.*:	e6 f6 9f a0 d0 0b [	 ]*vstebrf	%v15,4000\(%r6,%r9\),13
++.*:	e6 f6 9f a0 00 0b [	 ]*sterv	%v15,4000\(%r6,%r9\)
++.*:	e6 f6 9f a0 d0 0a [	 ]*vstebrg	%v15,4000\(%r6,%r9\),13
++.*:	e6 f6 9f a0 00 0a [	 ]*stdrv	%v15,4000\(%r6,%r9\)
++.*:	e7 f1 40 fd 06 86 [	 ]*vsld	%v15,%v17,%v20,253
++.*:	e7 f1 40 fd 06 87 [	 ]*vsrd	%v15,%v17,%v20,253
++.*:	e7 f1 4d 00 87 8b [	 ]*vstrs	%v15,%v17,%v20,%v24,13
++.*:	e7 f1 4d c0 87 8b [	 ]*vstrs	%v15,%v17,%v20,%v24,13,12
++.*:	e7 f1 40 00 87 8b [	 ]*vstrsb	%v15,%v17,%v20,%v24
++.*:	e7 f1 40 d0 87 8b [	 ]*vstrsb	%v15,%v17,%v20,%v24,13
++.*:	e7 f1 41 00 87 8b [	 ]*vstrsh	%v15,%v17,%v20,%v24
++.*:	e7 f1 41 d0 87 8b [	 ]*vstrsh	%v15,%v17,%v20,%v24,13
++.*:	e7 f1 42 00 87 8b [	 ]*vstrsf	%v15,%v17,%v20,%v24
++.*:	e7 f1 42 d0 87 8b [	 ]*vstrsf	%v15,%v17,%v20,%v24,13
++.*:	e7 f1 40 20 87 8b [	 ]*vstrszb	%v15,%v17,%v20,%v24
++.*:	e7 f1 40 f0 87 8b [	 ]*vstrszb	%v15,%v17,%v20,%v24,13
++.*:	e7 f1 41 20 87 8b [	 ]*vstrszh	%v15,%v17,%v20,%v24
++.*:	e7 f1 41 f0 87 8b [	 ]*vstrszh	%v15,%v17,%v20,%v24,13
++.*:	e7 f1 42 20 87 8b [	 ]*vstrszf	%v15,%v17,%v20,%v24
++.*:	e7 f1 42 f0 87 8b [	 ]*vstrszf	%v15,%v17,%v20,%v24,13
++.*:	e7 f1 00 bc d4 c3 [	 ]*vcfps	%v15,%v17,13,12,11
++.*:	e7 f1 00 cd 24 c3 [	 ]*wcefb	%v15,%v17,5,12
++.*:	e7 f1 00 cd 24 c3 [	 ]*wcefb	%v15,%v17,5,12
++.*:	e7 f1 00 bc d4 c1 [	 ]*vcfpl	%v15,%v17,13,12,11
++.*:	e7 f1 00 cd 24 c1 [	 ]*wcelfb	%v15,%v17,5,12
++.*:	e7 f1 00 cd 24 c1 [	 ]*wcelfb	%v15,%v17,5,12
++.*:	e7 f1 00 bc d4 c2 [	 ]*vcsfp	%v15,%v17,13,12,11
++.*:	e7 f1 00 cd 24 c2 [	 ]*wcfeb	%v15,%v17,5,12
++.*:	e7 f1 00 cd 24 c2 [	 ]*wcfeb	%v15,%v17,5,12
++.*:	e7 f1 00 bc d4 c0 [	 ]*vclfp	%v15,%v17,13,12,11
++.*:	e7 f1 00 cd 24 c0 [	 ]*wclfeb	%v15,%v17,5,12
++.*:	e7 f1 00 cd 24 c0 [	 ]*wclfeb	%v15,%v17,5,12
++.*:	b9 39 b0 69 [	 ]*dfltcc	%r6,%r9,%r11
++.*:	b9 38 00 69 [	 ]*sortl	%r6,%r9
++.*:	e6 6f 00 d0 00 50 [	 ]*vcvb	%r6,%v15,13
++.*:	e6 6f 00 dc 00 50 [	 ]*vcvb	%r6,%v15,13,12
++.*:	e6 6f 00 d0 00 52 [	 ]*vcvbg	%r6,%v15,13
++.*:	e6 6f 00 dc 00 52 [	 ]*vcvbg	%r6,%v15,13,12
++.*:	b9 3a 00 69 [	 ]*kdsa	%r6,%r9
+--- /dev/null	2019-03-07 09:27:55.425999321 +0000
++++ binutils-2.30/gas/testsuite/gas/s390/zarch-optargs.s	2019-03-07 13:24:31.563932472 +0000
+@@ -0,0 +1,6 @@
++.text
++foo:
++	vst     %v0,16
++	vst     %v0,16,3
++	vst     %v0,16(%r2)
++	vst     %v0,16(%r2),3
+--- /dev/null	2019-03-07 09:27:55.425999321 +0000
++++ binutils-2.30/gas/testsuite/gas/s390/zarch-optargs.d	2019-03-07 13:24:31.563932472 +0000
+@@ -0,0 +1,12 @@
++#name: s390x optargs
++#objdump: -dr
++
++.*: +file format .*
++
++Disassembly of section .text:
++
++.* <foo>:
++.*:	e7 00 00 10 00 0e [	 ]*vst	%v0,16
++.*:	e7 00 00 10 30 0e [	 ]*vst	%v0,16,3
++.*:	e7 00 20 10 00 0e [	 ]*vst	%v0,16\(%r2\)
++.*:	e7 00 20 10 30 0e [	 ]*vst	%v0,16\(%r2\),3
+--- binutils.orig/opcodes/s390-opc.txt	2019-03-13 13:04:45.457121525 +0000
++++ binutils-2.30/opcodes/s390-opc.txt	2019-03-13 13:08:20.009362157 +0000
+@@ -1889,106 +1889,120 @@ e70000000036 vlm VRS_VVRDU "vector load
+ e7000000000e vst VRX_VRRDU "vector store" arch12 zarch optparm
+ e7000000003e vstm VRS_VVRDU "vector store multiple" arch12 zarch optparm
+ 
++
+ # arch13 instructions
+ 
+-b9f5 ncrk RRF_R0RR2 " " arch13 zarch
+-b9e5 ncgrk RRF_R0RR2 " " arch13 zarch
+-e50a mvcrl SSE_RDRD " " arch13 zarch
+-b974 nnrk RRF_R0RR2 " " arch13 zarch
+-b964 nngrk RRF_R0RR2 " " arch13 zarch
+-b976 nork RRF_R0RR2 " " arch13 zarch
+-b966 nogrk RRF_R0RR2 " " arch13 zarch
+-b977 nxrk RRF_R0RR2 " " arch13 zarch
+-b967 nxgrk RRF_R0RR2 " " arch13 zarch
+-b975 ocrk RRF_R0RR2 " " arch13 zarch
+-b965 ocgrk RRF_R0RR2 " " arch13 zarch
+-b9e1 popcnt RRF_U0RR " " arch13 zarch optparm
+-b9f0 selr RRF_RURR " " arch13 zarch
+-b9f00000 selr*20 RRF_R0RR3 " " arch13 zarch
+-b9e3 selgr RRF_RURR " " arch13 zarch
+-b9e30000 selgr*20 RRF_R0RR3 " " arch13 zarch
+-b9c0 selhhhr RRF_RURR " " arch13 zarch
+-b9c00000 selhhhr*20 RRF_R0RR3 " " arch13 zarch
+-
+-e60000000006 vlbr VRX_VRRDU " " arch13 zarch
+-e60000001006 vlbrh VRX_VRRD " " arch13 zarch
+-e60000002006 vlbrf VRX_VRRD " " arch13 zarch
+-e60000003006 vlbrg VRX_VRRD " " arch13 zarch
+-e60000004006 vlbrq VRX_VRRD " " arch13 zarch
+-
+-e60000000007 vler VRX_VRRDU " " arch13 zarch
+-e60000001007 vlerh VRX_VRRD " " arch13 zarch
+-e60000002007 vlerf VRX_VRRD " " arch13 zarch
+-e60000003007 vlerg VRX_VRRD " " arch13 zarch
+-
+-e60000000004 vllebrz VRX_VRRDU " " arch13 zarch
+-e60000001004 vllebrzh VRX_VRRD " " arch13 zarch
+-e60000002004 vllebrzf VRX_VRRD " " arch13 zarch
+-e60000003004 ldrv VRX_VRRD " " arch13 zarch
+-e60000003004 vllebrzg VRX_VRRD " " arch13 zarch
+-e60000006004 lerv VRX_VRRD " " arch13 zarch
+-e60000006004 vllebrze VRX_VRRD " " arch13 zarch
+-
+-e60000000001 vlebrh VRX_VRRDU " " arch13 zarch
+-e60000000003 vlebrf VRX_VRRDU " " arch13 zarch
+-e60000000002 vlebrg VRX_VRRDU " " arch13 zarch
+-
+-e60000000005 vlbrrep VRX_VRRDU " " arch13 zarch
+-e60000001005 vlbrreph VRX_VRRD " " arch13 zarch
+-e60000002005 vlbrrepf VRX_VRRD " " arch13 zarch
+-e60000003005 vlbrrepg VRX_VRRD " " arch13 zarch
+-
+-e6000000000e vstbr VRX_VRRDU " " arch13 zarch
+-e6000000100e vstbrh VRX_VRRD " " arch13 zarch
+-e6000000200e vstbrf VRX_VRRD " " arch13 zarch
+-e6000000300e vstbrg VRX_VRRD " " arch13 zarch
+-e6000000400e vstbrq VRX_VRRD " " arch13 zarch
+-
+-e6000000000f vster VRX_VRRDU " " arch13 zarch
+-e6000000100f vsterh VRX_VRRD " " arch13 zarch
+-e6000000200f vsterf VRX_VRRD " " arch13 zarch
+-e6000000300f vsterg VRX_VRRD " " arch13 zarch
+-
+-e60000000009 vstebrh VRX_VRRDU " " arch13 zarch
+-e6000000000b vstebrf VRX_VRRDU " " arch13 zarch
+-e6000000000b sterv VRX_VRRD " " arch13 zarch
+-e6000000000a vstebrg VRX_VRRDU " " arch13 zarch
+-e6000000000a stdrv VRX_VRRD " " arch13 zarch
+-
+-e70000000086 vsld VRI_VVV0U " " arch13 zarch
+-e70000000087 vsrd VRI_VVV0U " " arch13 zarch
+-
+-e7000000008b vstrs VRR_VVVUU0V " " arch13 zarch optparm
+-
+-e7000000008b vstrsb VRR_VVVU0VB " " arch13 zarch optparm
+-e7000100008b vstrsh VRR_VVVU0VB " " arch13 zarch optparm
+-e7000200008b vstrsf VRR_VVVU0VB " " arch13 zarch optparm
+-
+-e7000020008b vstrszb VRR_VVVU0VB2 " " arch13 zarch optparm
+-e7000120008b vstrszh VRR_VVVU0VB2 " " arch13 zarch optparm
+-e7000220008b vstrszf VRR_VVVU0VB2 " " arch13 zarch optparm
+-
+-e700000000c3 vcfps VRR_VV0UUU " " arch13 zarch
+-e700000020c3 vcefb VRR_VV0UU " " arch13 zarch
+-e700000820c3 wcefb VRR_VV0UU8 " " arch13 zarch
+-
+-e700000000c1 vcfpl VRR_VV0UUU " " arch13 zarch
+-e700000020c1 vcelfb VRR_VV0UU " " arch13 zarch
+-e700000820c1 wcelfb VRR_VV0UU8 " " arch13 zarch
+-
+-e700000000c2 vcsfp VRR_VV0UUU " " arch13 zarch
+-e700000020c2 vcfeb VRR_VV0UU " " arch13 zarch
+-e700000820c2 wcfeb VRR_VV0UU8 " " arch13 zarch
+-
+-e700000000c0 vclfp VRR_VV0UUU " " arch13 zarch
+-e700000020c0 vclfeb VRR_VV0UU " " arch13 zarch
+-e700000820c0 wclfeb VRR_VV0UU8 " " arch13 zarch
+ 
+-b939 dfltcc RRF_R0RR2 " " arch13 zarch
++# Miscellaneous Instruction Extensions Facility 2
++
++b9f5 ncrk RRF_R0RR2 "and with complement 32 bit" arch13 zarch
++b9e5 ncgrk RRF_R0RR2 "and with complement 64 bit" arch13 zarch
++e50a mvcrl SSE_RDRD "move right to left" arch13 zarch
++b974 nnrk RRF_R0RR2 "nand 32 bit" arch13 zarch
++b964 nngrk RRF_R0RR2 "nand 64 bit" arch13 zarch
++b976 nork RRF_R0RR2 "nor 32 bit" arch13 zarch
++b966 nogrk RRF_R0RR2 "nor 64 bit" arch13 zarch
++b977 nxrk RRF_R0RR2 "not exclusive or 32 bit" arch13 zarch
++b967 nxgrk RRF_R0RR2 "not exclusive or 64 bit" arch13 zarch
++b975 ocrk RRF_R0RR2 "or with complement 32 bit" arch13 zarch
++b965 ocgrk RRF_R0RR2 "or with complement 64 bit" arch13 zarch
++b9e1 popcnt RRF_U0RR "population count arch13" arch13 zarch optparm
++b9f0 selr RRF_RURR "select 32 bit" arch13 zarch
++b9f00000 selr*20 RRF_R0RR3 "select 32 bit" arch13 zarch
++b9e3 selgr RRF_RURR "select 64 bit" arch13 zarch
++b9e30000 selgr*20 RRF_R0RR3 "select 64 bit" arch13 zarch
++b9c0 selfhr RRF_RURR "select high" arch13 zarch
++b9c00000 selfhr*20 RRF_R0RR3 "select high" arch13 zarch
++
++# Vector Enhancements Facility 2
++
++e60000000006 vlbr VRX_VRRDU "vector load byte reversed elements" arch13 zarch
++e60000001006 vlbrh VRX_VRRD "vector load byte reversed halfword elements" arch13 zarch
++e60000002006 vlbrf VRX_VRRD "vector load byte reversed word elements" arch13 zarch
++e60000003006 vlbrg VRX_VRRD "vector load byte reversed doubleword elements" arch13 zarch
++e60000004006 vlbrq VRX_VRRD "vector load byte reversed quadword elements" arch13 zarch
++
++e60000000007 vler VRX_VRRDU "vector load elements reversed" arch13 zarch
++e60000001007 vlerh VRX_VRRD "vector load halfword elements reversed" arch13 zarch
++e60000002007 vlerf VRX_VRRD "vector load word elements reversed" arch13 zarch
++e60000003007 vlerg VRX_VRRD "vector load doubleword elements reversed" arch13 zarch
++
++e60000000004 vllebrz VRX_VRRDU "vector load byte reversed element and zero" arch13 zarch
++e60000001004 vllebrzh VRX_VRRD "vector load byte reversed halfword element and zero" arch13 zarch
++e60000002004 vllebrzf VRX_VRRD "vector load byte reversed word element and zero" arch13 zarch
++e60000003004 ldrv VRX_VRRD "load byte reversed doubleword" arch13 zarch
++e60000003004 vllebrzg VRX_VRRD "vector load byte reversed doubleword element and zero" arch13 zarch
++e60000006004 lerv VRX_VRRD "load byte reversed word" arch13 zarch
++e60000006004 vllebrze VRX_VRRD "vector load byte reversed word element left-aligned and zero" arch13 zarch
++
++e60000000001 vlebrh VRX_VRRDU "vector load byte reversed halfword element" arch13 zarch
++e60000000003 vlebrf VRX_VRRDU "vector load byte reversed word element" arch13 zarch
++e60000000002 vlebrg VRX_VRRDU "vector load byte reversed doubleword element" arch13 zarch
++
++e60000000005 vlbrrep VRX_VRRDU "vector load byte reversed element and replicate" arch13 zarch
++e60000001005 vlbrreph VRX_VRRD "vector load byte reversed halfword element and replicate" arch13 zarch
++e60000002005 vlbrrepf VRX_VRRD "vector load byte reversed word element and replicate" arch13 zarch
++e60000003005 vlbrrepg VRX_VRRD "vector load byte reversed doubleword element and replicate" arch13 zarch
++
++e6000000000e vstbr VRX_VRRDU "vector store byte reversed elements" arch13 zarch
++e6000000100e vstbrh VRX_VRRD "vector store byte reversed halfword elements" arch13 zarch
++e6000000200e vstbrf VRX_VRRD "vector store byte reversed word elements" arch13 zarch
++e6000000300e vstbrg VRX_VRRD "vector store byte reversed doubleword elements" arch13 zarch
++e6000000400e vstbrq VRX_VRRD "vector store byte reversed quadword elements" arch13 zarch
++
++e6000000000f vster VRX_VRRDU "vector store elements reversed" arch13 zarch
++e6000000100f vsterh VRX_VRRD "vector store halfword elements reversed" arch13 zarch
++e6000000200f vsterf VRX_VRRD "vector store word elements reversed" arch13 zarch
++e6000000300f vsterg VRX_VRRD "vector store doubleword elements reversed" arch13 zarch
++
++e60000000009 vstebrh VRX_VRRDU "vector store byte reversed halfword element" arch13 zarch
++e6000000000b vstebrf VRX_VRRDU "vector store byte reversed word element" arch13 zarch
++e6000000000b sterv VRX_VRRD "store byte reversed word" arch13 zarch
++e6000000000a vstebrg VRX_VRRDU "vector store byte reversed doubleword element" arch13 zarch
++e6000000000a stdrv VRX_VRRD "store byte reversed doubleword" arch13 zarch
++
++e70000000086 vsld VRI_VVV0U "vector shift left double by bit" arch13 zarch
++e70000000087 vsrd VRI_VVV0U "vector shift right double by bit" arch13 zarch
++
++e7000000008b vstrs VRR_VVVUU0V "vector string search" arch13 zarch optparm
++
++e7000000008b vstrsb VRR_VVVU0VB "vector string search byte" arch13 zarch optparm
++e7000100008b vstrsh VRR_VVVU0VB "vector string search halfword" arch13 zarch optparm
++e7000200008b vstrsf VRR_VVVU0VB "vector string search word" arch13 zarch optparm
++
++e7000020008b vstrszb VRR_VVV0V "vector string search byte zero" arch13 zarch
++e7000120008b vstrszh VRR_VVV0V "vector string search halfword zero" arch13 zarch
++e7000220008b vstrszf VRR_VVV0V "vector string search word zero" arch13 zarch
++
++e700000000c3 vcfps VRR_VV0UUU "vector fp convert from fixed" arch13 zarch
++e700000020c3 vcefb VRR_VV0UU "vector fp convert from fixed 32 bit" arch13 zarch
++e700000820c3 wcefb VRR_VV0UU8 "vector fp convert from fixed 32 bit" arch13 zarch
++
++e700000000c1 vcfpl VRR_VV0UUU "vector fp convert from logical" arch13 zarch
++e700000020c1 vcelfb VRR_VV0UU "vector fp convert from logical 32 bit" arch13 zarch
++e700000820c1 wcelfb VRR_VV0UU8 "vector fp convert from logical 32 bit" arch13 zarch
++
++e700000000c2 vcsfp VRR_VV0UUU "vector fp convert to fixed" arch13 zarch
++e700000020c2 vcfeb VRR_VV0UU "vector fp convert to fixed 32 bit" arch13 zarch
++e700000820c2 wcfeb VRR_VV0UU8 "vector fp convert to fixed 32 bit" arch13 zarch
++
++e700000000c0 vclfp VRR_VV0UUU "vector fp convert to logical" arch13 zarch
++e700000020c0 vclfeb VRR_VV0UU "vector fp convert to logical 32 bit" arch13 zarch
++e700000820c0 wclfeb VRR_VV0UU8 "vector fp convert to logical 32 bit" arch13 zarch
++
++# Deflate conversion facility
++
++b939 dfltcc RRF_R0RR2 "deflate conversion call" arch13 zarch
++
++# Enhanced-Sort Facility
++
++b938 sortl RRE_RR "sort lists" arch13 zarch
++
++# Vector packed decimal enhancement facility
+ 
+-b938 sortl RRE_RR " " arch13 zarch
++e60000000050 vcvb VRR_RV0UU "vector convert to binary 32 bit" arch13 zarch optparm
++e60000000052 vcvbg VRR_RV0UU "vector convert to binary 64 bit" arch13 zarch optparm
+ 
+-e60000000050 vcvb VRR_RV0UU " " arch13 zarch optparm
+-e60000000052 vcvbg VRR_RV0UU " " arch13 zarch optparm
++# Message Security Assist Extension 9
+ 
+-b93a kdsa RRE_RR " " arch13 zarch
++b93a kdsa RRE_RR "compute digital signature authentication" arch13 zarch
+diff -rup binutils.orig/gas/testsuite/gas/s390/zarch-arch13.d binutils-2.30/gas/testsuite/gas/s390/zarch-arch13.d
+--- binutils.orig/gas/testsuite/gas/s390/zarch-arch13.d	2019-05-21 10:55:42.538069199 +0100
++++ binutils-2.30/gas/testsuite/gas/s390/zarch-arch13.d	2019-05-21 11:15:28.157369631 +0100
+@@ -61,27 +61,27 @@ Disassembly of section .text:
+ .*:	b9 e3 bd 69 [	 ]*selgrnh	%r6,%r9,%r11
+ .*:	b9 e3 bd 69 [	 ]*selgrnh	%r6,%r9,%r11
+ .*:	b9 e3 be 69 [	 ]*selgrno	%r6,%r9,%r11
+-.*:	b9 c0 bd 69 [	 ]*selhhhrnh	%r6,%r9,%r11
+-.*:	b9 c0 b1 69 [	 ]*selhhhro	%r6,%r9,%r11
+-.*:	b9 c0 b2 69 [	 ]*selhhhrh	%r6,%r9,%r11
+-.*:	b9 c0 b2 69 [	 ]*selhhhrh	%r6,%r9,%r11
+-.*:	b9 c0 b3 69 [	 ]*selhhhrnle	%r6,%r9,%r11
+-.*:	b9 c0 b4 69 [	 ]*selhhhrl	%r6,%r9,%r11
+-.*:	b9 c0 b4 69 [	 ]*selhhhrl	%r6,%r9,%r11
+-.*:	b9 c0 b5 69 [	 ]*selhhhrnhe	%r6,%r9,%r11
+-.*:	b9 c0 b6 69 [	 ]*selhhhrlh	%r6,%r9,%r11
+-.*:	b9 c0 b7 69 [	 ]*selhhhrne	%r6,%r9,%r11
+-.*:	b9 c0 b7 69 [	 ]*selhhhrne	%r6,%r9,%r11
+-.*:	b9 c0 b8 69 [	 ]*selhhhre	%r6,%r9,%r11
+-.*:	b9 c0 b8 69 [	 ]*selhhhre	%r6,%r9,%r11
+-.*:	b9 c0 b9 69 [	 ]*selhhhrnlh	%r6,%r9,%r11
+-.*:	b9 c0 ba 69 [	 ]*selhhhrhe	%r6,%r9,%r11
+-.*:	b9 c0 bb 69 [	 ]*selhhhrnl	%r6,%r9,%r11
+-.*:	b9 c0 bb 69 [	 ]*selhhhrnl	%r6,%r9,%r11
+-.*:	b9 c0 bc 69 [	 ]*selhhhrle	%r6,%r9,%r11
+-.*:	b9 c0 bd 69 [	 ]*selhhhrnh	%r6,%r9,%r11
+-.*:	b9 c0 bd 69 [	 ]*selhhhrnh	%r6,%r9,%r11
+-.*:	b9 c0 be 69 [	 ]*selhhhrno	%r6,%r9,%r11
++.*:	b9 c0 bd 69 [	 ]*selfhrnh	%r6,%r9,%r11
++.*:	b9 c0 b1 69 [	 ]*selfhro	%r6,%r9,%r11
++.*:	b9 c0 b2 69 [	 ]*selfhrh	%r6,%r9,%r11
++.*:	b9 c0 b2 69 [	 ]*selfhrh	%r6,%r9,%r11
++.*:	b9 c0 b3 69 [	 ]*selfhrnle	%r6,%r9,%r11
++.*:	b9 c0 b4 69 [	 ]*selfhrl	%r6,%r9,%r11
++.*:	b9 c0 b4 69 [	 ]*selfhrl	%r6,%r9,%r11
++.*:	b9 c0 b5 69 [	 ]*selfhrnhe	%r6,%r9,%r11
++.*:	b9 c0 b6 69 [	 ]*selfhrlh	%r6,%r9,%r11
++.*:	b9 c0 b7 69 [	 ]*selfhrne	%r6,%r9,%r11
++.*:	b9 c0 b7 69 [	 ]*selfhrne	%r6,%r9,%r11
++.*:	b9 c0 b8 69 [	 ]*selfhre	%r6,%r9,%r11
++.*:	b9 c0 b8 69 [	 ]*selfhre	%r6,%r9,%r11
++.*:	b9 c0 b9 69 [	 ]*selfhrnlh	%r6,%r9,%r11
++.*:	b9 c0 ba 69 [	 ]*selfhrhe	%r6,%r9,%r11
++.*:	b9 c0 bb 69 [	 ]*selfhrnl	%r6,%r9,%r11
++.*:	b9 c0 bb 69 [	 ]*selfhrnl	%r6,%r9,%r11
++.*:	b9 c0 bc 69 [	 ]*selfhrle	%r6,%r9,%r11
++.*:	b9 c0 bd 69 [	 ]*selfhrnh	%r6,%r9,%r11
++.*:	b9 c0 bd 69 [	 ]*selfhrnh	%r6,%r9,%r11
++.*:	b9 c0 be 69 [	 ]*selfhrno	%r6,%r9,%r11
+ .*:	e6 f6 9f a0 d0 06 [	 ]*vlbr	%v15,4000\(%r6,%r9\),13
+ .*:	e6 f6 9f a0 10 06 [	 ]*vlbrh	%v15,4000\(%r6,%r9\)
+ .*:	e6 f6 9f a0 20 06 [	 ]*vlbrf	%v15,4000\(%r6,%r9\)
+@@ -130,11 +130,8 @@ Disassembly of section .text:
+ .*:	e7 f1 42 00 87 8b [	 ]*vstrsf	%v15,%v17,%v20,%v24
+ .*:	e7 f1 42 d0 87 8b [	 ]*vstrsf	%v15,%v17,%v20,%v24,13
+ .*:	e7 f1 40 20 87 8b [	 ]*vstrszb	%v15,%v17,%v20,%v24
+-.*:	e7 f1 40 f0 87 8b [	 ]*vstrszb	%v15,%v17,%v20,%v24,13
+ .*:	e7 f1 41 20 87 8b [	 ]*vstrszh	%v15,%v17,%v20,%v24
+-.*:	e7 f1 41 f0 87 8b [	 ]*vstrszh	%v15,%v17,%v20,%v24,13
+ .*:	e7 f1 42 20 87 8b [	 ]*vstrszf	%v15,%v17,%v20,%v24
+-.*:	e7 f1 42 f0 87 8b [	 ]*vstrszf	%v15,%v17,%v20,%v24,13
+ .*:	e7 f1 00 bc d4 c3 [	 ]*vcfps	%v15,%v17,13,12,11
+ .*:	e7 f1 00 cd 24 c3 [	 ]*wcefb	%v15,%v17,5,12
+ .*:	e7 f1 00 cd 24 c3 [	 ]*wcefb	%v15,%v17,5,12
+@@ -154,3 +151,4 @@ Disassembly of section .text:
+ .*:	e6 6f 00 d0 00 52 [	 ]*vcvbg	%r6,%v15,13
+ .*:	e6 6f 00 dc 00 52 [	 ]*vcvbg	%r6,%v15,13,12
+ .*:	b9 3a 00 69 [	 ]*kdsa	%r6,%r9
++.*:	07 07 [	 ]*nopr	%r7
+diff -rup binutils.orig/gas/testsuite/gas/s390/zarch-arch13.s binutils-2.30/gas/testsuite/gas/s390/zarch-arch13.s
+--- binutils.orig/gas/testsuite/gas/s390/zarch-arch13.s	2019-05-21 10:55:42.534069229 +0100
++++ binutils-2.30/gas/testsuite/gas/s390/zarch-arch13.s	2019-05-21 11:14:33.365770952 +0100
+@@ -55,27 +55,27 @@ foo:
+ 	selgrnh	%r6,%r9,%r11
+ 	selgrnp	%r6,%r9,%r11
+ 	selgrno	%r6,%r9,%r11
+-	selhhhr	%r6,%r9,%r11,13
+-	selhhhro	%r6,%r9,%r11
+-	selhhhrh	%r6,%r9,%r11
+-	selhhhrp	%r6,%r9,%r11
+-	selhhhrnle	%r6,%r9,%r11
+-	selhhhrl	%r6,%r9,%r11
+-	selhhhrm	%r6,%r9,%r11
+-	selhhhrnhe	%r6,%r9,%r11
+-	selhhhrlh	%r6,%r9,%r11
+-	selhhhrne	%r6,%r9,%r11
+-	selhhhrnz	%r6,%r9,%r11
+-	selhhhre	%r6,%r9,%r11
+-	selhhhrz	%r6,%r9,%r11
+-	selhhhrnlh	%r6,%r9,%r11
+-	selhhhrhe	%r6,%r9,%r11
+-	selhhhrnl	%r6,%r9,%r11
+-	selhhhrnm	%r6,%r9,%r11
+-	selhhhrle	%r6,%r9,%r11
+-	selhhhrnh	%r6,%r9,%r11
+-	selhhhrnp	%r6,%r9,%r11
+-	selhhhrno	%r6,%r9,%r11
++	selfhr	%r6,%r9,%r11,13
++	selfhro	%r6,%r9,%r11
++	selfhrh	%r6,%r9,%r11
++	selfhrp	%r6,%r9,%r11
++	selfhrnle	%r6,%r9,%r11
++	selfhrl	%r6,%r9,%r11
++	selfhrm	%r6,%r9,%r11
++	selfhrnhe	%r6,%r9,%r11
++	selfhrlh	%r6,%r9,%r11
++	selfhrne	%r6,%r9,%r11
++	selfhrnz	%r6,%r9,%r11
++	selfhre	%r6,%r9,%r11
++	selfhrz	%r6,%r9,%r11
++	selfhrnlh	%r6,%r9,%r11
++	selfhrhe	%r6,%r9,%r11
++	selfhrnl	%r6,%r9,%r11
++	selfhrnm	%r6,%r9,%r11
++	selfhrle	%r6,%r9,%r11
++	selfhrnh	%r6,%r9,%r11
++	selfhrnp	%r6,%r9,%r11
++	selfhrno	%r6,%r9,%r11
+ 	vlbr	%v15,4000(%r6,%r9),13
+ 	vlbrh	%v15,4000(%r6,%r9)
+ 	vlbrf	%v15,4000(%r6,%r9)
+@@ -124,11 +124,8 @@ foo:
+ 	vstrsf	%v15,%v17,%v20,%v24
+ 	vstrsf	%v15,%v17,%v20,%v24,13
+ 	vstrszb	%v15,%v17,%v20,%v24
+-	vstrszb	%v15,%v17,%v20,%v24,13
+ 	vstrszh	%v15,%v17,%v20,%v24
+-	vstrszh	%v15,%v17,%v20,%v24,13
+ 	vstrszf	%v15,%v17,%v20,%v24
+-	vstrszf	%v15,%v17,%v20,%v24,13
+ 	vcfps	%v15,%v17,13,12,11
+ 	vcefb	%v15,%v17,13,12
+ 	wcefb	%v15,%v17,13,12

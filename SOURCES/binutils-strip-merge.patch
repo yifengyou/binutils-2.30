@@ -1,0 +1,19 @@
+--- binutils.orig/binutils/objcopy.c	2020-10-30 14:21:10.448328799 +0000
++++ binutils-2.30/binutils/objcopy.c	2020-10-30 14:22:08.406136672 +0000
+@@ -3257,14 +3257,12 @@ copy_object (bfd *ibfd, bfd *obfd, const
+ 	  /* It is likely that output sections are in the same order
+ 	     as the input sections, but do not assume that this is
+ 	     the case.  */
+-	  if (strcmp (bfd_section_name (obfd, merged->sec),
+-		      bfd_section_name (obfd, osec)) != 0)
++	  if (merged->sec->output_section != osec)
+ 	    {
+ 	      for (merged = merged_note_sections;
+ 		   merged != NULL;
+ 		   merged = merged->next)
+-		if (strcmp (bfd_section_name (obfd, merged->sec),
+-			    bfd_section_name (obfd, osec)) == 0)
++		if (merged->sec->output_section == osec)
+ 		  break;
+ 
+ 	      if (merged == NULL)
